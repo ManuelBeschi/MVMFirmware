@@ -32,7 +32,7 @@ typedef enum {VALVE_IN, VALVE_OUT} valves;
 
 
 // WiFi parameters
-const char* ssid = "AbbaAndrea0.2.5";
+const char* ssid = "test";
 const char* password =  "alchimista";
 
 // The port to listen for incoming TCP connections
@@ -337,16 +337,16 @@ void setup(void)
 
  
   // Connect to WiFi
-  WiFi.begin((char*)ssid, (char*)password);
+ /* WiFi.begin((char*)ssid, (char*)password);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
   Serial.println("");
   Serial.println("WiFi connected");
+*/
 
-
- /* // Connect to Wi-Fi network with SSID and password
+  // Connect to Wi-Fi network with SSID and password
   Serial.print("Setting AP (Access Point)…");
   // Remove the password parameter, if you want the AP (Access Point) to be open
   WiFi.softAP(ssid, password);
@@ -355,7 +355,7 @@ void setup(void)
   IPAddress IP = WiFi.softAPIP();
   Serial.print("AP IP address: ");
   Serial.println(IP);
-*/
+
   // Print ESP8266 Local IP Address
   Serial.println(WiFi.localIP());
   
