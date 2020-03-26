@@ -5,6 +5,8 @@
 #include <WiFi.h>
 #include <aREST.h>
 #include <Ticker.h>  //Ticker Library
+#include <Wire.h>
+#include <math.h>
 
 #define VERBOSE_LEVEL 3
 #define LISTEN_PORT           80
@@ -19,7 +21,8 @@
 #define VALVE_IN_PIN 15//14
 #define VALVE_OUT_PIN 2 //12
 
-#define SIMULATE_SENSORS 1
+#define SIMULATE_SENSORS 0
+
 
 
 
@@ -80,7 +83,16 @@ struct
   unsigned long timer1;  
 } core_sm_context;
 
-uint8_t pressure_sensor_i2c_address [] = {0x56};
+
+typedef struct
+{
+  int32_t C[6];
+} t_5525DSO_calibration_table;
+
+
+uint8_t pressure_sensor_i2c_address [] = {0x77};
+t_5525DSO_calibration_table PRES_SENS_CT[N_PRESSURE_SENSORS];
+
 // Declare functions to be exposed to the API
 int API_RUN_Control(String command);
 int API_SET_inhale_ms(String command);
@@ -97,6 +109,11 @@ void CoreSM_FORCE_ChangeState(t_core__force_sm *sm, t_core__force_sm NEW_STATE);
 void DBG_print(int level, String str);
 void TriggerAlarm(t_ALARM Alarm);
 
+void CalibrateDate_5525DSO(t_5525DSO_calibration_table CT, int32_t raw_temp, int32_t raw_pressure, float *T, float *P);
+bool Convert_5525DSO(int address, int32_t *temp, int32_t *pressure);
+bool Reset_5525DSO(int address);
+bool ReadCalibration_5525DSO(int address, t_5525DSO_calibration_table *ct);
+bool FirstConversion_5525DSO(int address);
 
 void DBG_print(int level, String str)
 {
@@ -139,7 +156,7 @@ void TriggerAlarm(t_ALARM Alarm)
 void  onTimerCoreTask(){
   
   DBG_print(10,"ITimer0: millis() = " + String(millis()));
-  DBG_print(3,"Pressure:  " + String(pressure[0].last_pressure));
+  
 
 
   //This is the core of the ventialtor.
@@ -252,6 +269,8 @@ void  onTimerCoreTask(){
 
 }
 
+
+
 void InitParameters()
 {
   core_config.run=false;
@@ -273,10 +292,25 @@ void setup(void)
   pinMode (VALVE_OUT_PIN, OUTPUT);
   // Start Serial
   Serial.begin(115200);
+  Wire.begin();
+  
+  for (int j=0;j<N_PRESSURE_SENSORS;j++)
+  {
+    Reset_5525DSO((int) pressure_sensor_i2c_address [j]);
+  }
 
+  delay(100);
+  for (int j=0;j<N_PRESSURE_SENSORS;j++)
+  {
+    FirstConversion_5525DSO((int) pressure_sensor_i2c_address [j]);
+  }
+
+  delay(100);
+  
   InitParameters();
 
   CoreTask.attach(TIMERCORE_INTERVAL_MS/1000.0, onTimerCoreTask);
+
   
   temperature = 24;
 
@@ -287,10 +321,10 @@ void setup(void)
   rest.function("run",API_RUN_Control);
   rest.function("inhale_ms",API_SET_inhale_ms);
   rest.function("exhale_ms",API_SET_exhale_ms);
-  rest.function("inhale_critical_alarm_ms",API_SET_inhale_critical_alarm_ms);
-  rest.function("exhale_critical_alarm_ms",API_SET_exhale_critical_alarm_ms);
-  rest.function("pressure_forced_inhale_max",API_SET_pressure_forced_inhale_max);
-  rest.function("pressure_forced_exhale_min",API_SET_pressure_forced_exhale_min);
+  rest.function("inhale_alarm_ms",API_SET_inhale_critical_alarm_ms);
+  rest.function("exhale_alarm_ms",API_SET_exhale_critical_alarm_ms);
+  rest.function("pressure_max",API_SET_pressure_forced_inhale_max);
+  rest.function("pressure_min",API_SET_pressure_forced_exhale_min);
   rest.function("pressure_drop",API_SET_pressure_drop);
 
   
@@ -332,6 +366,18 @@ void setup(void)
   // Print the IP address
   Serial.println(WiFi.localIP());
 
+  for (int j=0;j<N_PRESSURE_SENSORS;j++)
+  {
+    ReadCalibration_5525DSO( (int) pressure_sensor_i2c_address [j], &PRES_SENS_CT[j]);
+    Serial.print("SENSOR:           ");   Serial.println(j);
+    Serial.print("SENS_T1:          ");   Serial.println(PRES_SENS_CT[j].C[0]);
+    Serial.print("OFF_T1:           ");   Serial.println(PRES_SENS_CT[j].C[1]);
+    Serial.print("TCS:              ");   Serial.println(PRES_SENS_CT[j].C[2]);
+    Serial.print("TCO:              ");   Serial.println(PRES_SENS_CT[j].C[3]);
+    Serial.print("TREF:             ");   Serial.println(PRES_SENS_CT[j].C[4]);
+    Serial.print("TEMPSENS:         ");   Serial.println(PRES_SENS_CT[j].C[5]);
+  }
+  
 }
 
 
@@ -341,12 +387,20 @@ void loop() {
   static uint32_t last_loop_time;
   static uint8_t RestStateMachine =0;
   static int serverhanging = 0; // Used to monitor how long the client is hanging
-  static int serverhangingrestartdelay = 100; // delay after which we discard a hanging client
-
-  if (read_pressure_sensor(0)!= 0)
+  static int serverhangingrestartdelay = 500; // delay after which we discard a hanging client
+  static uint32_t sensor_read_last_time =0;
+  
+  if (millis() > sensor_read_last_time + 100)
   {
+    if (read_pressure_sensor(0)!= 0)
+    {
       TriggerAlarm(UNABLE_TO_READ_SENSOR_PRESSURE);
+    }
+    sensor_read_last_time= millis();
   }
+
+    //__service_i2c_detect();
+    
 
   switch(RestStateMachine)
   {
@@ -381,12 +435,14 @@ void loop() {
     break;
 
     case 2:
+    
       rest.handle(client);
+      client.stop();
       RestStateMachine=0;
     break;
 
     case 3:
-      if (millis() > last_loop_time + 100)
+      if (millis() > last_loop_time + 10)
       {
         RestStateMachine=0;
       }
@@ -437,8 +493,19 @@ int read_pressure_sensor(int idx)
     else
     {
       uint8_t i2c_address = pressure_sensor_i2c_address[idx];
-      pressure[0].last_pressure = 10;
-      pressure[0].read_millis=millis();  
+      int32_t raw_temp;
+      int32_t raw_pressure;
+      float T;
+      float P;
+      
+      if (Convert_5525DSO((int)i2c_address, &raw_temp, &raw_pressure))
+      {
+        CalibrateDate_5525DSO(PRES_SENS_CT[idx], raw_temp, raw_pressure, &T, &P);
+        DBG_print(3,"TEMPERATURE:      " + String(T));
+        DBG_print(3,"PRESSURE:      " + String(P));
+        pressure[0].last_pressure = P;
+        pressure[0].read_millis=millis();  
+      }
     }
 
     return 0;
@@ -607,4 +674,165 @@ int API_SET_pressure_drop(String command) {
   if ((value<0) && (value>15000)) return -1;
   core_config.pressure_drop = value;
   return 0;
+}
+
+
+void __service_i2c_detect()
+{
+   byte error, address;
+  int nDevices;
+  Serial.println("Scanning... I2C");
+  nDevices = 0;
+  for(address = 1; address < 127; address++ ) {
+    Wire.beginTransmission(address);
+    error = Wire.endTransmission();
+    if (error == 0) {
+      Serial.print("I2C device found at address 0x");
+      if (address<16) {
+        Serial.print("0");
+      }
+      Serial.println(address,HEX);
+      nDevices++;
+    }
+    else if (error==4) {
+      Serial.print("Unknow error at address 0x");
+      if (address<16) {
+        Serial.print("0");
+      }
+      Serial.println(address,HEX);
+    }    
+  }
+  if (nDevices == 0) {
+    Serial.println("No I2C devices found\n");
+  }
+  else {
+    Serial.println("done\n");
+  }
+
+}
+
+bool ReadCalibration_5525DSO(int address, t_5525DSO_calibration_table *ct)
+{
+  bool bres=true;
+  int error;
+  for (int i=0;i<6;i++)
+  {
+    Wire.beginTransmission(address);
+    Wire.write(0xA0 + ((i+1)<<1)); // MSB 
+    error = Wire.endTransmission(); 
+    Wire.requestFrom(address,2);
+    byte MSB = Wire.read();
+    byte LSB = Wire.read();
+    error = Wire.endTransmission(); 
+    ct->C[i] = (MSB<<8)+LSB;
+  }
+
+  return bres;
+}
+
+bool Reset_5525DSO(int address)
+{
+  int error;
+    Wire.beginTransmission(address);
+    Wire.write(0x1E); // MSB 
+    error = Wire.endTransmission(); 
+  return true;
+}
+
+bool FirstConversion_5525DSO(int address)
+{
+    Wire.beginTransmission(address);
+    Wire.write(0x58); // MSB 
+    Wire.endTransmission(); 
+    return true;
+}
+
+bool Convert_5525DSO(int address, int32_t *temp, int32_t *pressure)
+{
+  static int32_t last_temp;
+  static int32_t last_pressure;
+  static uint8_t temp_read=1;
+  bool bres=true;
+  int error;
+  byte b1, b2, b3;
+  
+  Wire.beginTransmission(address);
+    Wire.write(0x48); // MSB 
+    error = Wire.endTransmission(); 
+
+    delay(15);
+    
+    Wire.beginTransmission(address);
+    Wire.write(0x00); // MSB 
+    error = Wire.endTransmission(); 
+
+
+    delay(1);
+    
+    error = Wire.requestFrom(address,3, true);
+    if (error < 3) return false;
+    b1 = Wire.read();
+    b2 = Wire.read();
+    b3 = Wire.read();
+
+    *pressure = (b1<<16) + (b2<<8) + b3;
+     
+      
+    Wire.beginTransmission(address);
+    Wire.write(0x58); // MSB 
+    error = Wire.endTransmission(); 
+
+    delay(15);
+    
+    Wire.beginTransmission(address);
+    Wire.write(0x00); // MSB 
+    error = Wire.endTransmission(); 
+
+    delay(1);
+    
+    error = Wire.requestFrom(address,3, true);
+    if (error < 3) return false;
+    b1 = Wire.read();
+    b2 = Wire.read();
+    b3 = Wire.read();
+    *temp = (b1<<16) + (b2<<8) + b3;
+  
+   
+  return true;
+}
+
+void CalibrateDate_5525DSO(t_5525DSO_calibration_table CT, int32_t raw_temp, int32_t raw_pressure, float *T, float *P)
+{
+  int32_t Q1 = 15;
+  int32_t Q2 = 17;
+  int32_t Q3 = 7;
+  int32_t Q4 = 5;
+  int32_t Q5 = 7;
+  int32_t Q6 = 21;
+
+  int32_t C1 = CT.C[0];
+  int32_t C2 = CT.C[1];
+  int32_t C3 = CT.C[2];
+  int32_t C4 = CT.C[3];
+  int32_t C5 = CT.C[4];
+  int32_t C6 = CT.C[5];
+    
+  int32_t dT;
+  int64_t OFF;
+  int64_t SENS;
+
+  int32_t Temp;
+  int64_t Pres;
+  //Serial.println(raw_temp);
+  //Serial.println(raw_pressure);
+  dT = raw_temp - (C5 * pow(2,Q5));
+  Temp = 2000 + ( (dT*C6) /pow(2,Q6));
+  OFF = (C2 * pow(2,Q2)) + ((C4 * dT)/(pow(2,Q4)));
+  SENS = (C1 * pow(2,Q1)) + ((C3 * dT)/(pow(2,Q3)));
+  Pres = (((raw_pressure * SENS)/(pow(2,21))) - OFF)/(pow(2,15));
+
+  *T = ((float)Temp)/100.0;
+  *P = ((float)Pres)/10000.0 * 68.9476;
+  
+
 }
