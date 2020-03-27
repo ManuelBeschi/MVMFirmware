@@ -1,12 +1,13 @@
 
 
- 
 //#include <ESP8266WiFi.h>
 #include <WiFi.h>
 #include <aREST.h>
 #include <Ticker.h>  //Ticker Library
 #include <Wire.h>
 #include <math.h>
+#include <sfm3000wedo.h>
+
 
 #define VERBOSE_LEVEL 3
 #define LISTEN_PORT           80
@@ -18,16 +19,17 @@
 #define VALVE_CLOSE 0
 #define VALVE_OPEN 100
 
-#define VALVE_IN_PIN 15//14
-#define VALVE_OUT_PIN 2 //12
+#define VALVE_IN_PIN A0 //15//14  (25)
+#define VALVE_OUT_PIN A1 //2 //12   (34)
 
-#define SIMULATE_SENSORS 0
-
-
+#define SIMULATE_SENSORS 1
 
 
-typedef enum {FR_OPEN_INVALVE, FR_WAIT_INHALE_PRESSURE, FR_WAIT_INHALE_TIME, FR_OPEN_OUTVALVE, FR_WAIT_EXHALE_PRESSURE, FR_WAIT_EXHALE_TIME} t_core__force_sm;
-typedef enum {ALARM_NO_INHALE_PRESSURE_IN_TIME, ALARM_NO_EXHALE_PRESSURE_IN_TIME, PRESSURE_DROP_INHALE, UNABLE_TO_READ_SENSOR_PRESSURE} t_ALARM;
+SFM3000wedo measflow(64);
+
+
+typedef enum {FR_OPEN_INVALVE, FR_WAIT_INHALE_PRESSURE, FR_WAIT_INHALE_PRESSURE_EXTRA, FR_WAIT_INHALE_TIME, FR_OPEN_OUTVALVE, FR_WAIT_EXHALE_PRESSURE, FR_WAIT_EXHALE_PRESSURE_EXTRA, FR_WAIT_EXHALE_TIME} t_core__force_sm;
+typedef enum {ALARM_NO_INHALE_PRESSURE_IN_TIME, ALARM_NO_EXHALE_PRESSURE_IN_TIME, PRESSURE_DROP_INHALE, UNABLE_TO_READ_SENSOR_PRESSURE, ALARM_PRESSURE_TO_HIGH} t_ALARM;
 typedef enum {VALVE_IN, VALVE_OUT} valves;
 
 
@@ -46,14 +48,16 @@ WiFiServer server(LISTEN_PORT);
 
 // Variables to be exposed to the API
 float temperature;
-
+bool in_pressure_alarm=false;
 
 typedef enum {M_BREATH_FORCED, M_BREATH_ASSISTED} t_assist_mode;
 struct
 {
   bool run;
+  bool constant_rate_mode;
   uint16_t inhale_ms;
   uint16_t exhale_ms;
+  uint16_t inhale_ms_extra;
   float pressure_forced_inhale_max;
   float pressure_forced_exhale_min;
   float pressure_drop;
@@ -62,6 +66,8 @@ struct
   uint16_t exhale_critical_alarm_ms;
   t_assist_mode BreathMode;
 
+  float pressure_alarm;
+  float pressure_alarm_off;
 
   struct
   {
@@ -81,6 +87,7 @@ struct
 {
   t_core__force_sm force_sm =FR_OPEN_INVALVE;
   unsigned long timer1;  
+  unsigned long timer2;  
 } core_sm_context;
 
 
@@ -147,6 +154,12 @@ void TriggerAlarm(t_ALARM Alarm)
     case UNABLE_TO_READ_SENSOR_PRESSURE:
       DBG_print(0,"ALARM @ " + String(millis()) + " UNABLE_TO_READ_SENSOR_PRESSURE");
     break;
+
+    case ALARM_PRESSURE_TO_HIGH:
+      DBG_print(0,"ALARM @ " + String(millis()) + " ALARM_PRESSURE_TO_HIGH");
+    break;
+
+    
     
     default:
 
@@ -164,93 +177,153 @@ void  onTimerCoreTask(){
   if (core_config.BreathMode == M_BREATH_FORCED)
   {
     core_sm_context.timer1++;
+    core_sm_context.timer2++;
     SimulationFunction();
-    switch(core_sm_context.force_sm)
+
+    if (pressure[0].last_pressure <= core_config.pressure_alarm_off)
     {
-      case FR_OPEN_INVALVE:
-        if (core_config.run)
-        {
-          DBG_print(3,"FR_OPEN_INVALVE");
-          valve_contol(VALVE_IN, VALVE_OPEN);
-          CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_PRESSURE);
-          core_sm_context.timer1 =0;
-          DBG_print(3,"FR_WAIT_INHALE_PRESSURE");
-        }
-        break;
-
-      case FR_WAIT_INHALE_PRESSURE:
-        if (pressure[0].last_pressure >= core_config.pressure_forced_inhale_max)
-        {
-          valve_contol(VALVE_IN, VALVE_CLOSE);
-          CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_TIME);
-          DBG_print(3,"FR_WAIT_INHALE_TIME");
-        }
-        else
-        {
-          if (core_sm_context.timer1 >= (core_config.inhale_critical_alarm_ms/TIMERCORE_INTERVAL_MS))
+       in_pressure_alarm=false;
+    }
+    if ( (pressure[0].last_pressure >= core_config.pressure_alarm) || (in_pressure_alarm==true))
+    {
+      TriggerAlarm(ALARM_PRESSURE_TO_HIGH);
+      valve_contol(VALVE_IN, VALVE_CLOSE);
+      valve_contol(VALVE_OUT, VALVE_OPEN);
+      in_pressure_alarm=true;
+    }
+    else
+    {
+      switch(core_sm_context.force_sm)
+      {
+        case FR_OPEN_INVALVE:
+          if (core_config.run)
           {
-            TriggerAlarm(ALARM_NO_INHALE_PRESSURE_IN_TIME);
-            valve_contol(VALVE_IN, VALVE_CLOSE);
-            CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_OUTVALVE);
-            DBG_print(3,"FR_OPEN_OUTVALVE");
+            DBG_print(3,"FR_OPEN_INVALVE");
+            valve_contol(VALVE_IN, VALVE_OPEN);
+            if (core_config.constant_rate_mode)
+              CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_TIME);
+            else
+              CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_PRESSURE);
+  
+            core_sm_context.timer1 =0;
+            DBG_print(3,"FR_WAIT_INHALE_PRESSURE");
           }
-        }
-        
-        break;
-
-      case FR_WAIT_INHALE_TIME:
-          if (core_sm_context.timer1> (core_config.inhale_ms/TIMERCORE_INTERVAL_MS))
+          break;
+  
+        case FR_WAIT_INHALE_PRESSURE:
+          if (pressure[0].last_pressure >= core_config.pressure_forced_inhale_max)
           {
-            CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_OUTVALVE);
-            DBG_print(3,"FR_OPEN_OUTVALVE");
+            if (core_config.inhale_ms_extra>0)
+            {
+              core_sm_context.timer2 = 0; 
+              CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_PRESSURE_EXTRA);
+              DBG_print(3,"FR_WAIT_INHALE_PRESSURE_EXTRA");             
+            }
+            else
+            {
+  
+              valve_contol(VALVE_IN, VALVE_CLOSE);
+              CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_TIME);
+              DBG_print(3,"FR_WAIT_INHALE_TIME");            
+            }
           }
           else
           {
-            if (pressure[0].last_pressure <= core_config.pressure_drop)
+            if (core_sm_context.timer1 >= (core_config.inhale_critical_alarm_ms/TIMERCORE_INTERVAL_MS))
             {
               TriggerAlarm(ALARM_NO_INHALE_PRESSURE_IN_TIME);
+              valve_contol(VALVE_IN, VALVE_CLOSE);
+              CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_OUTVALVE);
+              DBG_print(3,"FR_OPEN_OUTVALVE");
             }
           }
-        break;
-
-      case FR_OPEN_OUTVALVE:
-        valve_contol(VALVE_OUT, VALVE_OPEN);
-        CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_PRESSURE);
-        core_sm_context.timer1 =0;
-        DBG_print(3,"FR_WAIT_EXHALE_PRESSURE");
+          
+          break;
+  
+        case FR_WAIT_INHALE_PRESSURE_EXTRA:
+            if ( (core_sm_context.timer2> (core_config.inhale_ms_extra/TIMERCORE_INTERVAL_MS)) ||
+            (core_sm_context.timer1> (core_config.inhale_ms/TIMERCORE_INTERVAL_MS)) )
+            {
+              valve_contol(VALVE_IN, VALVE_CLOSE);
+              CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_TIME);
+              DBG_print(3,"FR_OPEN_OUTVALVE");
+            }
+            else
+            {        
+              if (pressure[0].last_pressure <= core_config.pressure_drop)
+              {
+                TriggerAlarm(ALARM_NO_INHALE_PRESSURE_IN_TIME);
+              }            
+            }
+          break;
+          
+        case FR_WAIT_INHALE_TIME:
+            if (core_sm_context.timer1> (core_config.inhale_ms/TIMERCORE_INTERVAL_MS))
+            {
+              CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_OUTVALVE);
+              
+              if (core_config.constant_rate_mode)
+                valve_contol(VALVE_IN, VALVE_CLOSE);
+                
+              DBG_print(3,"FR_OPEN_OUTVALVE");
+            }
+            else
+            {
+              if (pressure[0].last_pressure <= core_config.pressure_drop)
+              {
+                TriggerAlarm(ALARM_NO_INHALE_PRESSURE_IN_TIME);
+              }
+            }
+          break;
         
-        break;
-
-      case FR_WAIT_EXHALE_PRESSURE:
-        if (pressure[0].last_pressure <= core_config.pressure_forced_exhale_min)
-        {
-          valve_contol(VALVE_OUT, VALVE_CLOSE);
+        case FR_OPEN_OUTVALVE:
+          valve_contol(VALVE_OUT, VALVE_OPEN);
           CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_TIME);
+          //if (core_config.constant_rate_mode)
+          //  CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_TIME);
+          //else
+          //  CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_PRESSURE);
+            
+          core_sm_context.timer1 =0;
           DBG_print(3,"FR_WAIT_EXHALE_TIME");
-        }
-        else
-        {
-          if (core_sm_context.timer1 >= (core_config.exhale_critical_alarm_ms/TIMERCORE_INTERVAL_MS))
+          
+          break;
+  
+        case FR_WAIT_EXHALE_PRESSURE:
+          if (pressure[0].last_pressure <= core_config.pressure_forced_exhale_min)
           {
-            TriggerAlarm(ALARM_NO_EXHALE_PRESSURE_IN_TIME);
+            valve_contol(VALVE_OUT, VALVE_CLOSE);
+            CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_TIME);
+            DBG_print(3,"FR_WAIT_EXHALE_TIME");
+          }
+          else
+          {
+            if (core_sm_context.timer1 >= (core_config.exhale_critical_alarm_ms/TIMERCORE_INTERVAL_MS))
+            {
+              TriggerAlarm(ALARM_NO_EXHALE_PRESSURE_IN_TIME);
+              valve_contol(VALVE_OUT, VALVE_CLOSE);
+              CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_INVALVE);
+              DBG_print(3,"FR_OPEN_INVALVE");
+            }
+          }
+          break;
+  
+        case FR_WAIT_EXHALE_TIME:
+          if (core_sm_context.timer1> (core_config.exhale_ms/TIMERCORE_INTERVAL_MS))
+          {
             valve_contol(VALVE_OUT, VALVE_CLOSE);
             CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_INVALVE);
+            if (core_config.constant_rate_mode)
+                valve_contol(VALVE_OUT, VALVE_CLOSE);
+                
             DBG_print(3,"FR_OPEN_INVALVE");
           }
-        }
-        break;
-
-      case FR_WAIT_EXHALE_TIME:
-        if (core_sm_context.timer1> (core_config.exhale_ms/TIMERCORE_INTERVAL_MS))
-        {
+          break;
+  
+        default:
           CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_INVALVE);
-          DBG_print(3,"FR_OPEN_INVALVE");
-        }
-        break;
-
-      default:
-        CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_INVALVE);
-        break;
+          break;
+      }
     }
   }
   else
@@ -273,14 +346,18 @@ void  onTimerCoreTask(){
 
 void InitParameters()
 {
-  core_config.run=false;
-  core_config.inhale_ms = 3000;
-  core_config.exhale_ms = 1200;
-  core_config.pressure_forced_inhale_max = 100;
-  core_config.pressure_forced_exhale_min = 15;
+  core_config.run=true;
+  core_config.constant_rate_mode = false;
+  core_config.inhale_ms = 2000;
+  core_config.inhale_ms_extra = 500;
+  core_config.exhale_ms = 1000;
+  core_config.pressure_alarm = 50;
+  core_config.pressure_alarm_off = 10;
+  core_config.pressure_forced_inhale_max = 30;
+  core_config.pressure_forced_exhale_min = 5;
   core_config.pressure_drop = 20;
-  core_config.inhale_critical_alarm_ms = 6000;
-  core_config.exhale_critical_alarm_ms = 4000;
+  core_config.inhale_critical_alarm_ms = 3000;
+  core_config.exhale_critical_alarm_ms = 2500;
   core_config.BreathMode = M_BREATH_FORCED;
   core_config.sim.rate_inhale_pressure=5;
   core_config.sim.rate_exhale_pressure=10;  
