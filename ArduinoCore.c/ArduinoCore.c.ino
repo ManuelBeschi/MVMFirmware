@@ -234,7 +234,7 @@ void  onTimerCoreTask(){
               else
                 CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_PRESSURE);
     
-              core_sm_context.timer1 =0;
+              //core_sm_context.timer1 =0;
               DBG_print(3,"FR_WAIT_INHALE_PRESSURE");
             }
             else
@@ -265,6 +265,7 @@ void  onTimerCoreTask(){
             //if (core_config.inhale_ms_extra>0)
             //{
               core_sm_context.timer2 = 0; 
+              core_sm_context.timer1 =0;
               CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_PRESSURE_EXTRA);
               DBG_print(3,"FR_WAIT_INHALE_PRESSURE_EXTRA");             
             //}
@@ -292,8 +293,8 @@ void  onTimerCoreTask(){
         case FR_WAIT_INHALE_PRESSURE_EXTRA:
             //if ( (core_sm_context.timer2> (core_config.inhale_ms_extra/TIMERCORE_INTERVAL_MS)) ||
             //(core_sm_context.timer1> (core_config.inhale_ms/TIMERCORE_INTERVAL_MS)) )
-            if ( (gasflux[0].last_flux < core_config.flux_close) ||
-            (core_sm_context.timer1> (core_config.inhale_ms/TIMERCORE_INTERVAL_MS)) )
+            if ( (gasflux[0].last_flux < core_config.flux_close))// ||
+            //(core_sm_context.timer1> (core_config.inhale_ms/TIMERCORE_INTERVAL_MS)) )
             {
               valve_contol(VALVE_IN, VALVE_CLOSE);
               CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_TIME);
@@ -397,16 +398,16 @@ void InitParameters()
 {
   core_config.run=true;
   core_config.constant_rate_mode = false;
-  core_config.inhale_ms = 3000;
-  core_config.inhale_ms_extra = 500;
+  core_config.inhale_ms = 0;
+  core_config.inhale_ms_extra = 00;
   core_config.exhale_ms = 1000;
   core_config.pressure_alarm = 100;
   core_config.pressure_alarm_off = 10;
   core_config.pressure_forced_inhale_max = 15;
   core_config.pressure_forced_exhale_min = 10;
   core_config.pressure_drop = 20;
-  core_config.inhale_critical_alarm_ms = 6000;
-  core_config.exhale_critical_alarm_ms = 6000;
+  core_config.inhale_critical_alarm_ms = 16000;
+  core_config.exhale_critical_alarm_ms = 16000;
   core_config.BreathMode = M_BREATH_FORCED; //M_BREATH_ASSISTED;//M_BREATH_FORCED;
   core_config.sim.rate_inhale_pressure=5;
   core_config.sim.rate_exhale_pressure=10;  
@@ -558,13 +559,16 @@ void loop() {
       TriggerAlarm(UNABLE_TO_READ_SENSOR_PRESSURE);
     }
 
-    if (MeasureFlux(&gasflux[0].last_flux) == false)
+    float flux ;
+    if (MeasureFlux(&flux) == false)
     {
      
     }
 
-    //DBG_print(1,String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(valve1_status) + "," + String(valve2_status));
-    DBG_print(1,String(millis()) + "," + String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(valve1_status) + "," + String(valve2_status));
+    gasflux[0].last_flux = gasflux[0].last_flux * 0.9 + (0.1*flux);
+
+    DBG_print(1,String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(valve1_status) + "," + String(valve2_status));
+    //DBG_print(1,String(millis()) + "," + String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(valve1_status) + "," + String(valve2_status));
     //DBG_print(1, "PRESSURE:      " + String(pressure[0].last_pressure));
     sensor_read_last_time= millis();
     gasflux[0].read_millis = millis();
