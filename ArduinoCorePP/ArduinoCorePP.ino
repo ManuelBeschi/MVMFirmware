@@ -252,9 +252,9 @@ void  onTimerCoreTask(){
               //ASSISTED BREATHING MODE
              
               
-              float delta = -1 *  pressure[0].last_pressure;
+              float delta =   pressure[0].last_pressure;
               valve_contol(VALVE_OUT, VALVE_OPEN);
-              if (delta > core_config.assist_pressure_delta_trigger)
+              if (delta < core_config.assist_pressure_delta_trigger)
               {
                 DBG_print(3,"FR_OPEN_INVALVE");
                 valve_contol(VALVE_IN, VALVE_OPEN);
@@ -408,7 +408,7 @@ void  onTimerCoreTask(){
 
 void InitParameters()
 {
-  
+/*  
   core_config.run=true;
   core_config.constant_rate_mode = true;
   core_config.inhale_ms = 750;
@@ -427,8 +427,8 @@ void InitParameters()
   core_config.flux_close = 5;
   core_config.assist_pressure_delta_trigger=5;
   core_config.target_pressure = 30;
-  
-/*
+  */
+
     core_config.run=true;
   core_config.constant_rate_mode = false;
   core_config.inhale_ms = 750;
@@ -444,9 +444,9 @@ void InitParameters()
   core_config.BreathMode = M_BREATH_ASSISTED; //M_BREATH_ASSISTED;//M_BREATH_FORCED;
   core_config.sim.rate_inhale_pressure=5;
   core_config.sim.rate_exhale_pressure=10;  
-  core_config.flux_close = 5;
-  core_config.assist_pressure_delta_trigger=5;
-  */
+  core_config.flux_close = 30;
+  core_config.assist_pressure_delta_trigger=2;
+  core_config.target_pressure = 30;
 /*
     core_config.run=true;
   core_config.constant_rate_mode = false;
@@ -586,9 +586,9 @@ void PressureControlLoop_PRESSIN()
   static float pid_out=0;
 
   float PID_P = 0.8;
-  float PID_I = 1;
+  float PID_I = 1;        //0.2 over resistance 50
   float PID_D = 0 ;  
-  float Pset2 = 0;
+  static float Pset2 = 0;
 
   float Pmeas = 0;
 
@@ -600,7 +600,7 @@ void PressureControlLoop_PRESSIN()
   }
   else
   {
-    Pset2=Pset;
+    Pset2 = (Pset2*0.7 )+ (0.3 * Pset);
   }
   pid_error = Pset2-Pmeas;
   pid_integral += pid_error ;
