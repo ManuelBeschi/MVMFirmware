@@ -6,6 +6,8 @@
 #include <Ticker.h>  //Ticker Library
 #include <Wire.h>
 #include <math.h>
+#include <SimpleCLI.h>
+
 
 
 
@@ -45,6 +47,12 @@ aREST rest = aREST();
 // Create an instance of the server
 WiFiServer server(LISTEN_PORT);
 
+// Create CLI Object
+SimpleCLI cli;
+// Commands
+Command param_set;
+Command param_get;
+
 // Variables to be exposed to the API
 float temperature;
 bool in_pressure_alarm=false;
@@ -71,6 +79,9 @@ struct
 
   float flux_close;
   float target_pressure;
+  float respiratory_rate;
+  float respiratory_ratio;
+  
   struct
   {
     float rate_inhale_pressure;
@@ -143,6 +154,10 @@ void SimulationFunction();
 bool MeasureFlux(float *Flow);
 void MeasureFluxInit();
 void PressureControlLoop_PRESSIN();
+void SetCommandCallback(cmd* c);
+void GetCommandCallback(cmd* c);
+void CliErrorCallback(cmd_error* e);
+
 int valve1_status = 0;
 int valve2_status = 0;
 
@@ -408,7 +423,7 @@ void  onTimerCoreTask(){
 
 void InitParameters()
 {
-/*  
+  
   core_config.run=true;
   core_config.constant_rate_mode = true;
   core_config.inhale_ms = 750;
@@ -427,8 +442,13 @@ void InitParameters()
   core_config.flux_close = 5;
   core_config.assist_pressure_delta_trigger=5;
   core_config.target_pressure = 30;
-  */
 
+  core_config.respiratory_rate = 30;
+  core_config.respiratory_ratio = 0.75;
+  core_config.inhale_ms = 60000.0 / core_config.respiratory_rate * (1-core_config.respiratory_ratio);
+  core_config.exhale_ms = 60000.0 / core_config.respiratory_rate * (core_config.respiratory_ratio);
+  
+/*
     core_config.run=true;
   core_config.constant_rate_mode = false;
   core_config.inhale_ms = 750;
@@ -447,6 +467,8 @@ void InitParameters()
   core_config.flux_close = 30;
   core_config.assist_pressure_delta_trigger=2;
   core_config.target_pressure = 30;
+
+  */
 /*
     core_config.run=true;
   core_config.constant_rate_mode = false;
@@ -575,7 +597,155 @@ void setup(void)
 
   MeasureFluxInit();
   Serial.println(" Measure Flow Sensor initialized!");
+
+
+
+  cli.setOnError(CliErrorCallback); // Set error Callback
+  param_set = cli.addCommand("set", SetCommandCallback);
+  param_set.addPositionalArgument("param", "null");
+  param_set.addPositionalArgument("value", "0");
+
+  param_get = cli.addCommand("get", GetCommandCallback);
+  param_get.addPositionalArgument("param", "null");
+
 }
+
+
+void CliErrorCallback(cmd_error* e) {
+    CommandError cmdError(e); // Create wrapper object
+    Serial.print("ERROR: ");
+    Serial.println(cmdError.toString());
+}
+
+void SetCommandCallback(cmd* c) {
+    Command cmd(c); // Create wrapper object
+
+    // Get arguments
+    Argument param    = cmd.getArgument("param");
+    Argument value    = cmd.getArgument("value");
+
+    String strPatam = param.getValue();
+
+    //Serial.println("CMD: " +  param.getValue() + " " +  value.getValue());
+
+    if (strPatam == "run")
+    {
+      int numberValue = value.getValue().toInt();
+       
+      if (numberValue<1)
+        core_config.run=false;
+      else
+        core_config.run=true;
+    }
+
+    if (strPatam == "mode")
+    {
+      int numberValue = value.getValue().toInt();
+      if (numberValue == 0)
+      {
+        //Forced Mode  
+        core_config.constant_rate_mode = true;
+        core_config.pressure_alarm = 100;
+        core_config.pressure_alarm_off = 50;
+        core_config.inhale_critical_alarm_ms = 16000;
+        core_config.exhale_critical_alarm_ms = 16000;
+        core_config.BreathMode = M_BREATH_FORCED;
+      }
+      else
+      {
+        //Assisted Mode
+        core_config.constant_rate_mode = false;
+        core_config.pressure_alarm = 100;
+        core_config.pressure_alarm_off = 50;
+        core_config.inhale_critical_alarm_ms = 16000;
+        core_config.exhale_critical_alarm_ms = 16000;
+        core_config.BreathMode = M_BREATH_ASSISTED;
+      }
+    }
+
+    if (strPatam == "rate")
+    {
+      float numberValue = value.getValue().toFloat();
+      core_config.respiratory_rate = numberValue;
+      core_config.inhale_ms = 60000.0 / core_config.respiratory_rate * (1-core_config.respiratory_ratio);
+      core_config.exhale_ms = 60000.0 / core_config.respiratory_rate * (core_config.respiratory_ratio);
+    }
+
+    if (strPatam == "ratio")
+    {
+      float numberValue = value.getValue().toFloat();
+      core_config.respiratory_ratio = numberValue;
+      core_config.inhale_ms = 60000.0 / core_config.respiratory_rate * (1-core_config.respiratory_ratio);
+      core_config.exhale_ms = 60000.0 / core_config.respiratory_rate * (core_config.respiratory_ratio);
+    }
+
+    if (strPatam == "assist_ptrigger")
+    {
+      float numberValue = value.getValue().toFloat();
+      core_config.assist_pressure_delta_trigger=numberValue;
+    }    
+    
+    if (strPatam == "assist_flow_min")
+    {
+      float numberValue = value.getValue().toFloat();
+      core_config.target_pressure = numberValue;
+    }  
+
+
+    if (strPatam == "ptarget")
+    {
+      float numberValue = value.getValue().toFloat();
+      core_config.target_pressure  = numberValue;
+    }  
+
+      
+
+
+
+}
+
+
+
+void GetCommandCallback(cmd* c) {
+    Command cmd(c); // Create wrapper object
+
+    // Get arguments
+    Argument param    = cmd.getArgument("param");
+ 
+
+    String strPatam = param.getValue();
+
+    //Serial.println("CMD: " +  param.getValue() + " " +  value.getValue());
+
+    if (strPatam == "pressure")
+    {
+      Serial.println(String(pressure[0].last_pressure));
+    }
+
+    if (strPatam == "flow")
+    {
+      Serial.println(String(gasflux[0].last_flux));
+    }
+
+    if (strPatam == "o2")
+    {
+      Serial.println(0);
+    }
+
+    if (strPatam == "bpm")
+    {
+      Serial.println(1);
+    }
+
+    if (strPatam == "all")
+    {
+      Serial.println(String(pressure[0].last_pressure) + "," + String(gasflux[0].last_flux) + "," + String(0) + "," + String(1));
+    }  
+
+
+
+}
+
 
 void PressureControlLoop_PRESSIN()
 {
@@ -658,7 +828,21 @@ void loop() {
     gasflux[0].read_millis = millis();
   }
 
-    DBG_print(1,String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(PIDMonitor/2) + "," + String(valve2_status));
+    //DBG_print(1,String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(PIDMonitor/2) + "," + String(valve2_status));
+
+
+  if (Serial.available()) {
+        // Read out string from the serial monitor
+        String input = Serial.readStringUntil('\n');
+
+        // Echo the user input
+       // Serial.print("# ");
+      //  Serial.println(input);
+
+        // Parse the user input into the CLI
+        cli.parse(input);
+    }
+
 
 }
 
