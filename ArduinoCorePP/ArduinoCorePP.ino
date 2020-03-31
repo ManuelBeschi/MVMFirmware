@@ -87,6 +87,9 @@ struct
     float rate_inhale_pressure;
     float rate_exhale_pressure;
   } sim;
+  float P;
+  float I;
+  float D;
 } core_config;
 
 
@@ -211,8 +214,30 @@ void TriggerAlarm(t_ALARM Alarm)
     break;
   }
 }
+
+int dbg_state_machine =0;
+float dgb_delta;
+int dbg_trigger;
+float dgb_peaktime;
+  float fluxpeak=0;
+  unsigned long peaktime=0;
+  
 void  onTimerCoreTask(){
   static float old_pressure[5];
+  static float old_delta;
+  static float pplow=0;
+   static float pplow_old;
+
+
+  pplow = 0.80*pplow + pressure[0].last_pressure *0.2;
+                
+  float delta =  pplow -  pplow_old ;
+  float delta2 = delta-old_delta;
+              
+  pplow_old = pplow;
+  old_delta = delta;
+  dgb_delta=delta2;  
+  
   DBG_print(10,"ITimer0: millis() = " + String(millis()));
   
   old_pressure[4] = old_pressure[3];
@@ -221,13 +246,16 @@ void  onTimerCoreTask(){
   old_pressure[1] = old_pressure[0];
   old_pressure[0] = pressure[0].last_pressure;
 
-  float mean = (old_pressure[0] + old_pressure[1] + old_pressure[2])/3.0;
+  float mean = (old_pressure[1] + old_pressure[2] + old_pressure[3])/3.0;
   //This is the core of the ventialtor.
   //This section must work inside a SO timer and must be called every 0.1 seconds
   //if (core_config.BreathMode == M_BREATH_FORCED)
   //{
     core_sm_context.timer1++;
     core_sm_context.timer2++;
+    
+
+    
     SimulationFunction();
 
     if (mean <= core_config.pressure_alarm_off)
@@ -246,10 +274,13 @@ void  onTimerCoreTask(){
       switch(core_sm_context.force_sm)
       {
         case FR_OPEN_INVALVE:
+          dbg_state_machine =0;
           if (core_config.run)
           {
             if (core_config.BreathMode == M_BREATH_FORCED)
             {
+               fluxpeak=0;
+                peaktime=millis();
               //FORCE BREATHING MODE
               DBG_print(3,"FR_OPEN_INVALVE");
                core_sm_context.timer1 =0;
@@ -262,15 +293,19 @@ void  onTimerCoreTask(){
               //core_sm_context.timer1 =0;
               DBG_print(3,"FR_WAIT_INHALE_PRESSURE");
             }
-            else
+            else  
             {
               //ASSISTED BREATHING MODE
              
-              
-              float delta =   pressure[0].last_pressure;
+
+
+              dbg_trigger=0;
               valve_contol(VALVE_OUT, VALVE_OPEN);
-              if (delta < core_config.assist_pressure_delta_trigger)
+              if ((-1.0*delta2) > core_config.assist_pressure_delta_trigger)
               {
+                dbg_trigger=1;
+                fluxpeak=0;
+                peaktime=0;
                 DBG_print(3,"FR_OPEN_INVALVE");
                 valve_contol(VALVE_IN, VALVE_OPEN);
                 valve_contol(VALVE_OUT, VALVE_CLOSE);
@@ -286,6 +321,7 @@ void  onTimerCoreTask(){
           break;
   
         case FR_WAIT_INHALE_PRESSURE:
+          dbg_state_machine =1;
           if (pressure[0].last_pressure >= core_config.pressure_forced_inhale_max)
           {
             //if (core_config.inhale_ms_extra>0)
@@ -317,9 +353,12 @@ void  onTimerCoreTask(){
           break;
   
         case FR_WAIT_INHALE_PRESSURE_EXTRA:
+            dbg_state_machine =2;
             //if ( (core_sm_context.timer2> (core_config.inhale_ms_extra/TIMERCORE_INTERVAL_MS)) ||
             //(core_sm_context.timer1> (core_config.inhale_ms/TIMERCORE_INTERVAL_MS)) )
-            if ( (gasflux[0].last_flux < core_config.flux_close))// ||
+            if ( (gasflux[0].last_flux <= (core_config.flux_close * fluxpeak)/100.0 ))
+            
+            // ||
             //(core_sm_context.timer1> (core_config.inhale_ms/TIMERCORE_INTERVAL_MS)) )
             {
               valve_contol(VALVE_IN, VALVE_CLOSE);
@@ -333,6 +372,7 @@ void  onTimerCoreTask(){
           break;
           
         case FR_WAIT_INHALE_TIME:
+            dbg_state_machine =3;
             if (core_sm_context.timer1> (core_config.inhale_ms/TIMERCORE_INTERVAL_MS))
             {
               CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_OUTVALVE);
@@ -352,23 +392,36 @@ void  onTimerCoreTask(){
           break;
         
         case FR_OPEN_OUTVALVE:
+          dbg_state_machine =4;
           valve_contol(VALVE_OUT, VALVE_OPEN);
-          //CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_TIME);
-          if (core_config.constant_rate_mode)
-            CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_TIME);
-          else
-            CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_PRESSURE);
-            
+
+         
+            //CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_TIME);
+            if (core_config.constant_rate_mode)
+              CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_TIME);
+            else
+              CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_PRESSURE);
+          
           core_sm_context.timer1 =0;
           DBG_print(3,"FR_WAIT_EXHALE_TIME");
           
           break;
   
         case FR_WAIT_EXHALE_PRESSURE:
+          dbg_state_machine =5;
           if (pressure[0].last_pressure <= core_config.pressure_forced_exhale_min)
           {
  //           valve_contol(VALVE_OUT, VALVE_CLOSE);
-            CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_TIME);
+            if (core_config.BreathMode == M_BREATH_FORCED)
+            {
+                CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_TIME);
+            }
+            else
+            {
+                CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_INVALVE);  
+            }
+              
+            
             core_sm_context.timer1 =0;
             DBG_print(3,"FR_WAIT_EXHALE_TIME");
           }
@@ -385,6 +438,7 @@ void  onTimerCoreTask(){
           break;
   
         case FR_WAIT_EXHALE_TIME:
+          dbg_state_machine =6;
           if (core_sm_context.timer1> (core_config.exhale_ms/TIMERCORE_INTERVAL_MS))
           {
             if (core_config.BreathMode == M_BREATH_FORCED)
@@ -447,6 +501,31 @@ void InitParameters()
   core_config.respiratory_ratio = 0.75;
   core_config.inhale_ms = 60000.0 / core_config.respiratory_rate * (1-core_config.respiratory_ratio);
   core_config.exhale_ms = 60000.0 / core_config.respiratory_rate * (core_config.respiratory_ratio);
+
+
+  core_config.P=0.8;
+  core_config.I=1;
+  core_config.D=0;
+
+ /*   core_config.run=true;
+  core_config.constant_rate_mode = false;
+  core_config.inhale_ms = 0;
+  core_config.inhale_ms_extra = 00;
+  core_config.exhale_ms = 0;
+  core_config.pressure_alarm = 100;
+  core_config.pressure_alarm_off = 10;
+  core_config.pressure_forced_inhale_max = 15;
+  core_config.pressure_forced_exhale_min = 10;
+  core_config.pressure_drop = 8;
+  core_config.inhale_critical_alarm_ms = 16000;
+  core_config.exhale_critical_alarm_ms = 16000;
+  core_config.BreathMode = M_BREATH_ASSISTED; //M_BREATH_ASSISTED;//M_BREATH_FORCED;
+  core_config.sim.rate_inhale_pressure=5;
+  core_config.sim.rate_exhale_pressure=10;  
+  core_config.flux_close = 30;
+  core_config.assist_pressure_delta_trigger=0.1;
+  core_config.target_pressure = 25;
+*/
   
 /*
     core_config.run=true;
@@ -660,6 +739,8 @@ void SetCommandCallback(cmd* c) {
         core_config.inhale_critical_alarm_ms = 16000;
         core_config.exhale_critical_alarm_ms = 16000;
         core_config.BreathMode = M_BREATH_ASSISTED;
+         core_config.inhale_ms =0;
+         core_config.exhale_ms = 0;
       }
     }
 
@@ -698,7 +779,29 @@ void SetCommandCallback(cmd* c) {
       core_config.target_pressure  = numberValue;
     }  
 
-      
+    if (strPatam == "peep")
+    {
+      float numberValue = value.getValue().toFloat();
+      core_config.pressure_forced_exhale_min = numberValue;
+    }  
+   
+    if (strPatam == "pid_p")
+    {
+      float numberValue = value.getValue().toFloat();
+      core_config.P = numberValue;
+    }  
+
+    if (strPatam == "pid_i")
+    {
+      float numberValue = value.getValue().toFloat();
+      core_config.I = numberValue;
+    }  
+
+    if (strPatam == "pid_d")
+    {
+      float numberValue = value.getValue().toFloat();
+      core_config.D = numberValue;
+    }  
 
 
 
@@ -746,6 +849,10 @@ void GetCommandCallback(cmd* c) {
 
 }
 
+  /*float P = 0.8;
+  float I = 1;
+  float D =0;*/
+
 
 void PressureControlLoop_PRESSIN()
 {
@@ -755,10 +862,16 @@ void PressureControlLoop_PRESSIN()
   static float pid_prec=0;
   static float pid_out=0;
 
-  float PID_P = 0.8;
-  float PID_I = 1;        //0.2 over resistance 50
-  float PID_D = 0 ;  
+  //valvola parker
+  //P=0.8
+  //I=1;  //0.2 over 50 resistance 
+  //D=0;
+  float PID_P = core_config.P;
+  float PID_I = core_config.I;        //0.2 over resistance 50
+  float PID_D = core_config.D;  
   static float Pset2 = 0;
+
+  static float pid_outb=0;
 
   float Pmeas = 0;
 
@@ -767,10 +880,13 @@ void PressureControlLoop_PRESSIN()
   if (Pset == 0)
   {
     Pset2 =Pmeas ;
+    if (pid_integral == (255/PID_I))
+      pid_integral=0;
   }
   else
   {
-    Pset2 = (Pset2*0.7 )+ (0.3 * Pset);
+    Pset2 = (Pset2*0.9 )+ (0.1 * Pset);
+    // Pset2 = (Pset2*0.7 )+ (0.3 * Pset); //Parker con lettura lenta
   }
   pid_error = Pset2-Pmeas;
   pid_integral += pid_error ;
@@ -779,9 +895,11 @@ void PressureControlLoop_PRESSIN()
   
   pid_out= PID_P* pid_error + PID_I*pid_integral + PID_D*(pid_error-pid_prec);
 
-  if (pid_out<0) pid_out=0;
+  //pid_outb = pid_outb * 0.8 + pid_out*0.2;
+  pid_outb = pid_out;
+  if (pid_outb<0) pid_outb=0;
     pid_out = pid_out + 50;
-  if (pid_out>240) pid_out=240;
+  if (pid_outb>240) pid_outb=240;
 
   pid_prec = pid_error;
 
@@ -826,11 +944,20 @@ void loop() {
     //DBG_print(1, "PRESSURE:      " + String(pressure[0].last_pressure));
     sensor_read_last_time= millis();
     gasflux[0].read_millis = millis();
+
+    
+    //if (millis()-peaktime<1000)
+  
+      fluxpeak = fluxpeak > gasflux[0].last_flux ? fluxpeak : gasflux[0].last_flux;
+      dgb_peaktime = fluxpeak;
+ 
+    
   }
 
-    //DBG_print(1,String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(PIDMonitor/2) + "," + String(valve2_status));
+    //DBG_print(1,String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(PIDMonitor/2) + "," + String(valve2_status)+"," +
+    //String(dbg_state_machine*10)+"," + String(dgb_delta*100) + "," + String(dbg_trigger*50)+ "," + String(dgb_peaktime));
 
-
+DBG_print(1,String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(PIDMonitor/2) + "," + String(valve2_status));
   if (Serial.available()) {
         // Read out string from the serial monitor
         String input = Serial.readStringUntil('\n');
@@ -1201,10 +1328,10 @@ bool Convert_5525DSO(int address, int32_t *temp, int32_t *pressure)
 
 
     Wire.beginTransmission(address);
-    Wire.write(0x48); // MSB 
+    Wire.write(0x42); // MSB 
     error = Wire.endTransmission(); 
 
-    delay(15);
+    delay(2);
     
     Wire.beginTransmission(address);
     Wire.write(0x00); // MSB 
@@ -1225,10 +1352,10 @@ bool Convert_5525DSO(int address, int32_t *temp, int32_t *pressure)
     {
       
       Wire.beginTransmission(address);
-      Wire.write(0x58); // MSB 
+      Wire.write(0x52); // MSB 
       error = Wire.endTransmission(); 
   
-      delay(15);
+      delay(2);
       
       Wire.beginTransmission(address);
       Wire.write(0x00); // MSB 
