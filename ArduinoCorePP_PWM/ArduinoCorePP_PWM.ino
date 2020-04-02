@@ -1,4 +1,13 @@
+//PID  
+//resistenza 5- 20
+//core_config.P=12.8;
+//core_config.I=16;
+//core_config.D=0;
 
+//resistenza 50- 200
+//core_config.P=70;
+//core_config.I=4;
+//core_config.D=0;
 
 //#include <ESP8266WiFi.h>
 #include <WiFi.h>
@@ -8,7 +17,8 @@
 #include <math.h>
 #include <SimpleCLI.h>
 
-#define GUI_MODE 1
+#define GUI_MODE 0
+#define MODE_PEEP 1
 
 
 #define VERBOSE_LEVEL 1
@@ -167,6 +177,7 @@ int valve2_status = 0;
 float Pset = 0;
 
 float PIDMonitor = 0;
+bool peep_look=false;
 
   
 void DBG_print(int level, String str)
@@ -364,6 +375,7 @@ void  onTimerCoreTask(){
               valve_contol(VALVE_IN, VALVE_CLOSE);
               CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_TIME);
               DBG_print(3,"FR_OPEN_OUTVALVE");
+
             }
             else
             {        
@@ -378,8 +390,11 @@ void  onTimerCoreTask(){
               CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_OUTVALVE);
                core_sm_context.timer1 =0;
               if (core_config.constant_rate_mode)
+              {
                 valve_contol(VALVE_IN, VALVE_CLOSE);
+                valve_contol(VALVE_OUT, VALVE_OPEN);
                 
+              }
               DBG_print(3,"FR_OPEN_OUTVALVE");
             }
             else
@@ -394,7 +409,7 @@ void  onTimerCoreTask(){
         case FR_OPEN_OUTVALVE:
           dbg_state_machine =4;
           valve_contol(VALVE_OUT, VALVE_OPEN);
-
+        
          
             //CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_TIME);
             if (core_config.constant_rate_mode)
@@ -409,6 +424,7 @@ void  onTimerCoreTask(){
   
         case FR_WAIT_EXHALE_PRESSURE:
           dbg_state_machine =5;
+          
           if (pressure[0].last_pressure <= core_config.pressure_forced_exhale_min)
           {
  //           valve_contol(VALVE_OUT, VALVE_CLOSE);
@@ -439,8 +455,10 @@ void  onTimerCoreTask(){
   
         case FR_WAIT_EXHALE_TIME:
           dbg_state_machine =6;
+           
           if (core_sm_context.timer1> (core_config.exhale_ms/TIMERCORE_INTERVAL_MS))
           {
+            peep_look=false;
             if (core_config.BreathMode == M_BREATH_FORCED)
               valve_contol(VALVE_OUT, VALVE_CLOSE);
             CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_INVALVE);
@@ -503,8 +521,8 @@ void InitParameters()
   core_config.exhale_ms = 60000.0 / core_config.respiratory_rate * (core_config.respiratory_ratio);
 
 
-  core_config.P=0.8;
-  core_config.I=1;
+  core_config.P=12.8;
+  core_config.I=16;
   core_config.D=0;
 
  /*   core_config.run=true;
@@ -572,6 +590,12 @@ void setup(void)
 {
   //pinMode (VALVE_IN_PIN, OUTPUT);
 
+  ledcSetup(0, 10000, 12);
+  
+  // attach the channel to the GPIO to be controlled
+  ledcAttachPin(DAC1, 0);
+
+     ledcWrite(0, 255);
   pinMode (VALVE_OUT_PIN, OUTPUT);
 
 
@@ -892,7 +916,7 @@ void PressureControlLoop_PRESSIN()
   if (Pset == 0)
   {
     Pset2 =Pmeas ;
-    if (pid_integral == (255/PID_I))
+    if (pid_integral == (4095/PID_I))
       pid_integral=0;
   }
   else
@@ -902,8 +926,8 @@ void PressureControlLoop_PRESSIN()
   }
   pid_error = Pset2-Pmeas;
   pid_integral += pid_error ;
-  if ((pid_integral*PID_I) > 255 ) pid_integral = (255/PID_I);
-  if ((pid_integral*PID_I) <-255 ) pid_integral = -(255/PID_I);
+  if ((pid_integral*PID_I) > 4095 ) pid_integral = (4095/PID_I);
+  if ((pid_integral*PID_I) <-4095 ) pid_integral = -(4095/PID_I);
   
   pid_out= PID_P* pid_error + PID_I*pid_integral + PID_D*(pid_error-pid_prec);
 
@@ -911,14 +935,15 @@ void PressureControlLoop_PRESSIN()
   pid_outb = pid_out;
   if (pid_outb<0) pid_outb=0;
    // pid_outb = pid_outb + 50;
-  if (pid_outb>240) pid_outb=240;
+  if (pid_outb>4090) pid_outb=4090;
 
   pid_prec = pid_error;
 
   if (Pset==0)
-    dacWrite(DAC1, 0);
+    ledcWrite(0, 4095);
   else
-    dacWrite(DAC1, pid_outb);
+    ledcWrite(0, 4095-pid_outb);
+
 
   PIDMonitor = pid_outb;
 
@@ -939,7 +964,15 @@ void loop() {
   }
 
   PressureControlLoop_PRESSIN();
- 
+
+ /*if (peep_look==true)
+ {
+  if (pressure[0].last_pressure<10)
+  {
+    valve_contol(VALVE_OUT, VALVE_CLOSE);    
+  }
+
+ }*/
   if (millis() > sensor_read_last_time + 20)
   {
 
@@ -970,7 +1003,7 @@ void loop() {
     //String(dbg_state_machine*10)+"," + String(dgb_delta*100) + "," + String(dbg_trigger*50)+ "," + String(dgb_peaktime));
   
   if (GUI_MODE==0)
-    DBG_print(1,String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(PIDMonitor/2) + "," + String(valve2_status));
+    DBG_print(1,String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(PIDMonitor*100/4096) + "," + String(valve2_status));
     
   if (Serial.available()) {
         // Read out string from the serial monitor
@@ -1083,13 +1116,15 @@ int valve_contol(valves valve, int level)
       if (level==VALVE_CLOSE)
       {
         valve2_status=0;
-        digitalWrite(VALVE_OUT_PIN, LOW);
+        digitalWrite(VALVE_OUT_PIN, HIGH);
+        
         DBG_print(3,"VALVE OUT CLOSED");
       } 
       else if (level==VALVE_OPEN)
       {
         valve2_status=100;
-        digitalWrite(VALVE_OUT_PIN, HIGH);
+        digitalWrite(VALVE_OUT_PIN, LOW);
+          
         DBG_print(3,"VALVE OUT OPENED");
       }
       else
