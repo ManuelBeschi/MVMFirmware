@@ -24,9 +24,10 @@
 #define VERBOSE_LEVEL 1
 #define LISTEN_PORT           80
 
-#define N_PRESSURE_SENSORS 1
+#define N_PRESSURE_SENSORS 2
 
-#define TIMERCORE_INTERVAL_MS        100 
+#define TIMERCORE_INTERVAL_MS  25      
+//100 
 
 #define VALVE_CLOSE 0
 #define VALVE_OPEN 100
@@ -100,6 +101,10 @@ struct
   float P;
   float I;
   float D;
+
+  float P2;
+  float I2;
+  float D2;  
 } core_config;
 
 
@@ -110,7 +115,7 @@ typedef struct
   float last_pressure;
   long  read_millis;
 } t_pressure;
-t_pressure pressure[1];
+t_pressure pressure[2];
 
 typedef struct
 {
@@ -132,10 +137,12 @@ struct
 typedef struct
 {
   int32_t C[6];
+  float ZERO;
 } t_5525DSO_calibration_table;
 
 
-uint8_t pressure_sensor_i2c_address [] = {0x76};
+uint8_t pressure_sensor_i2c_address [] = {0x76, 0x77};
+uint8_t flow_sensor_i2c_address [] = {0x40};
 t_5525DSO_calibration_table PRES_SENS_CT[N_PRESSURE_SENSORS];
 
 // Declare functions to be exposed to the API
@@ -159,7 +166,7 @@ void DBG_print(int level, String str);
 void TriggerAlarm(t_ALARM Alarm);
 
 void CalibrateDate_5525DSO(t_5525DSO_calibration_table CT, int32_t raw_temp, int32_t raw_pressure, float *T, float *P);
-bool Convert_5525DSO(int address, int32_t *temp, int32_t *pressure);
+bool Convert_5525DSO(int address, int32_t *temp, int32_t *pressure, bool read_temp);
 bool Reset_5525DSO(int address);
 bool ReadCalibration_5525DSO(int address, t_5525DSO_calibration_table *ct);
 bool FirstConversion_5525DSO(int address);
@@ -177,7 +184,12 @@ int valve2_status = 0;
 float Pset = 0;
 
 float PIDMonitor = 0;
+float PIDMonitor2 = 0;
+
 bool peep_look=false;
+
+float CURRENT_PSET=0;
+
 
   
 void DBG_print(int level, String str)
@@ -240,7 +252,7 @@ void  onTimerCoreTask(){
    static float pplow_old;
 
 
-  pplow = 0.80*pplow + pressure[0].last_pressure *0.2;
+  pplow = 0.80*pplow + pressure[1].last_pressure *0.2;
                 
   float delta =  pplow -  pplow_old ;
   float delta2 = delta-old_delta;
@@ -295,7 +307,9 @@ void  onTimerCoreTask(){
               //FORCE BREATHING MODE
               DBG_print(3,"FR_OPEN_INVALVE");
                core_sm_context.timer1 =0;
+               CURRENT_PSET = core_config.target_pressure;
               valve_contol(VALVE_IN, VALVE_OPEN);
+              
               if (core_config.constant_rate_mode)
                 CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_TIME);
               else
@@ -309,9 +323,10 @@ void  onTimerCoreTask(){
               //ASSISTED BREATHING MODE
              
 
-
-              dbg_trigger=0;
+              
               valve_contol(VALVE_OUT, VALVE_OPEN);
+              dbg_trigger=0;
+              
               if ((-1.0*delta2) > core_config.assist_pressure_delta_trigger)
               {
                 dbg_trigger=1;
@@ -320,6 +335,7 @@ void  onTimerCoreTask(){
                 DBG_print(3,"FR_OPEN_INVALVE");
                 valve_contol(VALVE_IN, VALVE_OPEN);
                 valve_contol(VALVE_OUT, VALVE_CLOSE);
+                 core_sm_context.timer1 =0;
                 if (core_config.constant_rate_mode)
                   CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_TIME);
                 else
@@ -332,8 +348,17 @@ void  onTimerCoreTask(){
           break;
   
         case FR_WAIT_INHALE_PRESSURE:
+        // if (core_sm_context.timer1 >= 300/TIMERCORE_INTERVAL_MS)
+         {
+              
+              core_sm_context.timer2 = 0; 
+              core_sm_context.timer1 =0;
+              CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_PRESSURE_EXTRA);
+              DBG_print(3,"FR_WAIT_INHALE_PRESSURE_EXTRA");  
+         }
+              
           dbg_state_machine =1;
-          if (pressure[0].last_pressure >= core_config.pressure_forced_inhale_max)
+          /*if (pressure[0].last_pressure >= core_config.pressure_forced_inhale_max)
           {
             //if (core_config.inhale_ms_extra>0)
             //{
@@ -360,6 +385,7 @@ void  onTimerCoreTask(){
               DBG_print(3,"FR_OPEN_OUTVALVE");
             }
           }
+          */
           
           break;
   
@@ -373,6 +399,7 @@ void  onTimerCoreTask(){
             //(core_sm_context.timer1> (core_config.inhale_ms/TIMERCORE_INTERVAL_MS)) )
             {
               valve_contol(VALVE_IN, VALVE_CLOSE);
+              valve_contol(VALVE_OUT, VALVE_OPEN);
               CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_TIME);
               DBG_print(3,"FR_OPEN_OUTVALVE");
 
@@ -410,12 +437,15 @@ void  onTimerCoreTask(){
           dbg_state_machine =4;
           valve_contol(VALVE_OUT, VALVE_OPEN);
         
-         
+            
             //CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_TIME);
             if (core_config.constant_rate_mode)
               CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_TIME);
             else
+            {
               CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_PRESSURE);
+              core_sm_context.timer2 =0;
+            }
           
           core_sm_context.timer1 =0;
           DBG_print(3,"FR_WAIT_EXHALE_TIME");
@@ -425,7 +455,7 @@ void  onTimerCoreTask(){
         case FR_WAIT_EXHALE_PRESSURE:
           dbg_state_machine =5;
           
-          if (pressure[0].last_pressure <= core_config.pressure_forced_exhale_min)
+          if (core_sm_context.timer2  > 300/TIMERCORE_INTERVAL_MS)
           {
  //           valve_contol(VALVE_OUT, VALVE_CLOSE);
             if (core_config.BreathMode == M_BREATH_FORCED)
@@ -503,27 +533,31 @@ void InitParameters()
   core_config.exhale_ms = 1250;
   core_config.pressure_alarm = 100;
   core_config.pressure_alarm_off = 10;
-  core_config.pressure_forced_inhale_max = 15;
-  core_config.pressure_forced_exhale_min = 10;
+  core_config.pressure_forced_inhale_max = 0;
+  core_config.pressure_forced_exhale_min = 0;
   core_config.pressure_drop = 8;
   core_config.inhale_critical_alarm_ms = 16000;
   core_config.exhale_critical_alarm_ms = 16000;
   core_config.BreathMode = M_BREATH_FORCED; //M_BREATH_ASSISTED;//M_BREATH_FORCED;
   core_config.sim.rate_inhale_pressure=5;
   core_config.sim.rate_exhale_pressure=10;  
-  core_config.flux_close = 5;
-  core_config.assist_pressure_delta_trigger=5;
+  core_config.flux_close = 30;
+  core_config.assist_pressure_delta_trigger=0.1;
   core_config.target_pressure = 30;
 
-  core_config.respiratory_rate = 30;
+  core_config.respiratory_rate = 15;
   core_config.respiratory_ratio = 0.75;
   core_config.inhale_ms = 60000.0 / core_config.respiratory_rate * (1-core_config.respiratory_ratio);
   core_config.exhale_ms = 60000.0 / core_config.respiratory_rate * (core_config.respiratory_ratio);
 
 
-  core_config.P=12.8;
-  core_config.I=16;
+  core_config.P=100;//70;//12.8;
+  core_config.I=10;//10;//16;
   core_config.D=0;
+
+  core_config.P2=1.4;
+  core_config.I2=0.7;
+  core_config.D2=0;  
 
  /*   core_config.run=true;
   core_config.constant_rate_mode = false;
@@ -595,7 +629,7 @@ void setup(void)
   // attach the channel to the GPIO to be controlled
   ledcAttachPin(DAC1, 0);
 
-     ledcWrite(0, 255);
+  ledcWrite(0, 4095);
   pinMode (VALVE_OUT_PIN, OUTPUT);
 
 
@@ -621,9 +655,7 @@ void setup(void)
   valve_contol(VALVE_IN, VALVE_CLOSE);
   valve_contol(VALVE_OUT, VALVE_OPEN);
   delay(3000);     
-  valve_contol(VALVE_IN, VALVE_CLOSE);
-  valve_contol(VALVE_OUT, VALVE_CLOSE);
-   
+
   InitParameters();
 
   CoreTask.attach(TIMERCORE_INTERVAL_MS/1000.0, onTimerCoreTask);
@@ -695,6 +727,15 @@ void setup(void)
     Serial.print("TCO:              ");   Serial.println(PRES_SENS_CT[j].C[3]);
     Serial.print("TREF:             ");   Serial.println(PRES_SENS_CT[j].C[4]);
     Serial.print("TEMPSENS:         ");   Serial.println(PRES_SENS_CT[j].C[5]);
+    float mean=0;
+    PRES_SENS_CT[j].ZERO = 0;
+    for (int q=0;q<100;q++)
+    {
+      read_pressure_sensor(j);
+      mean +=pressure[j].last_pressure;
+    }
+    PRES_SENS_CT[j].ZERO = mean/100;
+    Serial.print("OFFSET:            ");   Serial.println(PRES_SENS_CT[j].ZERO);
   }
 
 
@@ -710,6 +751,11 @@ void setup(void)
 
   param_get = cli.addCommand("get", GetCommandCallback);
   param_get.addPositionalArgument("param", "null");
+
+
+  valve_contol(VALVE_IN, VALVE_CLOSE);
+  valve_contol(VALVE_OUT, VALVE_CLOSE);
+   
 
 }
 
@@ -799,7 +845,7 @@ void SetCommandCallback(cmd* c) {
     if (strPatam == "assist_flow_min")
     {
       float numberValue = value.getValue().toFloat();
-      core_config.target_pressure = numberValue;
+      core_config.flux_close = numberValue;
       Serial.println("valore=OK");
     }  
 
@@ -840,6 +886,26 @@ void SetCommandCallback(cmd* c) {
     }  
 
 
+    if (strPatam == "pid_p2")
+    {
+      float numberValue = value.getValue().toFloat();
+      core_config.P2 = numberValue;
+      Serial.println("valore=OK");
+    }  
+
+    if (strPatam == "pid_i2")
+    {
+      float numberValue = value.getValue().toFloat();
+      core_config.I2 = numberValue;
+      Serial.println("valore=OK");
+    }  
+
+    if (strPatam == "pid_d2")
+    {
+      float numberValue = value.getValue().toFloat();
+      core_config.D2 = numberValue;
+      Serial.println("valore=OK");
+    } 
 
 }
 
@@ -890,6 +956,61 @@ void GetCommandCallback(cmd* c) {
   float D =0;*/
 
 
+float fast_pid_set=0;
+
+void PressureControlLoop_PRESSIN_SLOW()
+{
+
+  static float pid_error=0;
+  static float pid_integral=0;
+  static float pid_prec=0;
+  static float pid_out=0;
+
+  float PID_P = core_config.P2;
+  float PID_I = core_config.I2;        //0.2 over resistance 50
+  float PID_D = core_config.D2;  
+  static float Pset2 = 0;
+
+  static float pid_outb=0;
+
+  float Pmeas = 0;
+
+  Pmeas = pressure[1].last_pressure;
+
+  if (Pset == 0)
+  {
+    Pset2 = Pmeas;
+    pid_integral=0;
+    pid_prec=0;
+    pid_outb=0;
+  }
+  else
+  {
+    Pset2 = (Pset2*0.7 )+ (0.3 * Pset) ;
+  
+    pid_error = Pset2-Pmeas;
+    pid_integral += pid_error ;
+   // if ((pid_integral*PID_I) > 60 ) pid_integral = (60/PID_I);
+   // if ((pid_integral*PID_I) <-60 ) pid_integral = -(60/PID_I);
+    
+    pid_out= PID_P* pid_error + PID_I*pid_integral + PID_D*(pid_error-pid_prec);
+  
+  
+    pid_outb = pid_out;
+    
+    if (pid_outb<0) pid_outb=0;
+    if (pid_outb>50) pid_outb=50;
+  
+    pid_prec = pid_error;
+  
+
+    fast_pid_set=pid_outb;    
+  }
+
+
+    PIDMonitor2 = pid_outb;
+}
+
 void PressureControlLoop_PRESSIN()
 {
 
@@ -916,34 +1037,39 @@ void PressureControlLoop_PRESSIN()
   if (Pset == 0)
   {
     Pset2 =Pmeas ;
-    if (pid_integral == (4095/PID_I))
+    //if (pid_integral == (4095/PID_I))
       pid_integral=0;
+      pid_prec=0;
+      ledcWrite(0, 4095);
   }
   else
   {
-    Pset2 = (Pset2*0.9 )+ (0.1 * Pset);
+    Pset2 = (Pset2*0.9 )+ (0.1 * fast_pid_set) ;
     // Pset2 = (Pset2*0.7 )+ (0.3 * Pset); //Parker con lettura lenta
-  }
-  pid_error = Pset2-Pmeas;
-  pid_integral += pid_error ;
-  if ((pid_integral*PID_I) > 4095 ) pid_integral = (4095/PID_I);
-  if ((pid_integral*PID_I) <-4095 ) pid_integral = -(4095/PID_I);
   
-  pid_out= PID_P* pid_error + PID_I*pid_integral + PID_D*(pid_error-pid_prec);
-
-  //pid_outb = pid_outb * 0.8 + pid_out*0.2;
-  pid_outb = pid_out;
-  if (pid_outb<0) pid_outb=0;
-   // pid_outb = pid_outb + 50;
-  if (pid_outb>4090) pid_outb=4090;
-
-  pid_prec = pid_error;
-
-  if (Pset==0)
-    ledcWrite(0, 4095);
-  else
-    ledcWrite(0, 4095-pid_outb);
-
+  pid_error = Pset2-Pmeas;
+    pid_integral += pid_error ;
+    if ((pid_integral*PID_I) > 4095 ) pid_integral = (4095/PID_I);
+    if ((pid_integral*PID_I) <-4095 ) pid_integral = -(4095/PID_I);
+    
+    pid_out= PID_P* pid_error + PID_I*pid_integral + PID_D*(pid_error-pid_prec);
+  
+    //pid_outb = pid_outb * 0.8 + pid_out*0.2;
+    pid_outb = pid_out;
+    if (pid_outb<0) pid_outb=0;
+     pid_outb = pid_outb + 1000;
+    if (pid_outb>4090) pid_outb=4090;
+  
+    pid_prec = pid_error;
+  
+    if (Pset==0)
+      ledcWrite(0, 4095);
+    else
+      ledcWrite(0, 4095-pid_outb);
+  
+      
+  }
+  
 
   PIDMonitor = pid_outb;
 
@@ -975,7 +1101,10 @@ void loop() {
  }*/
   if (millis() > sensor_read_last_time + 20)
   {
-
+    if (read_pressure_sensor(1)!= 0)
+    {
+    }
+    PressureControlLoop_PRESSIN_SLOW();
 
     float flux ;
     if (MeasureFlux(&flux) == false)
@@ -1003,7 +1132,7 @@ void loop() {
     //String(dbg_state_machine*10)+"," + String(dgb_delta*100) + "," + String(dbg_trigger*50)+ "," + String(dgb_peaktime));
   
   if (GUI_MODE==0)
-    DBG_print(1,String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(PIDMonitor*100/4096) + "," + String(valve2_status));
+    DBG_print(1,String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(pressure[1].last_pressure)+ ","  + String(PIDMonitor*100/4096) +  ","  + String(PIDMonitor2) + "," + String(valve2_status));
     
   if (Serial.available()) {
         // Read out string from the serial monitor
@@ -1065,12 +1194,12 @@ int read_pressure_sensor(int idx)
       float T;
       float P;
       
-      if (Convert_5525DSO((int)i2c_address, &raw_temp, &raw_pressure))
+      if (Convert_5525DSO((int)i2c_address, &raw_temp, &raw_pressure,true))
       {
         CalibrateDate_5525DSO(PRES_SENS_CT[idx], raw_temp, raw_pressure, &T, &P);
 
-        pressure[0].last_pressure = P;
-        pressure[0].read_millis=millis();  
+        pressure[idx].last_pressure = P;
+        pressure[idx].read_millis=millis();  
       }
     }
 
@@ -1096,7 +1225,7 @@ int valve_contol(valves valve, int level)
     {
       valve1_status=100;
       //digitalWrite(VALVE_IN_PIN, HIGH);
-      Pset = core_config.target_pressure;
+      Pset = core_config.target_pressure;;
       DBG_print(3,"VALVE IN OPENED");
     }
     else
@@ -1366,11 +1495,9 @@ bool FirstConversion_5525DSO(int address)
     return true;
 }
 
-bool Convert_5525DSO(int address, int32_t *temp, int32_t *pressure)
+bool Convert_5525DSO(int address, int32_t *temp, int32_t *pressure, bool read_temp)
 {
-  static int32_t last_temp;
-  static int32_t last_pressure;
-  static uint8_t temp_read=0;
+
   bool bres=true;
   int error;
   byte b1, b2, b3;
@@ -1397,7 +1524,7 @@ bool Convert_5525DSO(int address, int32_t *temp, int32_t *pressure)
 
     *pressure = (b1<<16) + (b2<<8) + b3;
 
-    if (temp_read==0)
+    if (read_temp==true)
     {
       
       Wire.beginTransmission(address);
@@ -1418,13 +1545,6 @@ bool Convert_5525DSO(int address, int32_t *temp, int32_t *pressure)
       b2 = Wire.read();
       b3 = Wire.read();
       *temp = (b1<<16) + (b2<<8) + b3;
-      last_temp= *temp;
-      temp_read=50;
-    }
-    else
-    {
-      temp_read--;
-      *temp = last_temp;
     }
    
   return true;
@@ -1462,6 +1582,7 @@ void CalibrateDate_5525DSO(t_5525DSO_calibration_table CT, int32_t raw_temp, int
 
   *T = ((float)Temp)/100.0;
   *P = ((float)Pres)/10000.0 * 68.9476;
+  *P=*P-CT.ZERO;
   
 
 }
@@ -1469,8 +1590,8 @@ void CalibrateDate_5525DSO(t_5525DSO_calibration_table CT, int32_t raw_temp, int
 void MeasureFluxInit()
 {
   Wire.begin();
-  Wire.beginTransmission(byte(0x40)); // transmit to device with I2C mI2cAddress
-  Wire.beginTransmission(byte(0x40)); // transmit to device with I2C mI2cAddress
+  Wire.beginTransmission(byte(flow_sensor_i2c_address[0])); // transmit to device with I2C mI2cAddress
+  Wire.beginTransmission(byte(flow_sensor_i2c_address[0])); // transmit to device with I2C mI2cAddress
   Wire.write(byte(0x10));      //
   Wire.write(byte(0x00));      //
   Wire.endTransmission();
@@ -1490,7 +1611,7 @@ uint8_t crc8(const uint8_t data, uint8_t crc)
 
 float MeasureFluxRaw()
 {
-  Wire.requestFrom(0x40, 3); // read 3 bytes from device with address 0x40
+  Wire.requestFrom(flow_sensor_i2c_address[0], 3); // read 3 bytes from device with address 0x40
   uint16_t a = Wire.read(); // first received byte stored here. The variable "uint16_t" can hold 2 bytes, this will be relevant later
   uint8_t b = Wire.read(); // second received byte stored here
   uint8_t crc = Wire.read(); // crc value stored here
