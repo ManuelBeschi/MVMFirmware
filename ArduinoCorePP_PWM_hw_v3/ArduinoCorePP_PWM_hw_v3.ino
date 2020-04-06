@@ -20,6 +20,12 @@
 
 #define TCAADDR 0x70
 
+#define IIC_MUX_FLOW2 3
+#define IIC_MUX_FLOW1 2
+#define IIC_MUX_P_FASTLOOP 4
+#define IIC_MUX_P_2 5
+#define IIC_MUX_P_3 6
+
 #define GUI_MODE 0
 #define MODE_PEEP 1
 
@@ -38,7 +44,7 @@
 //#define VALVE_IN_PIN  A0 //15//14  (25)
 
 #define DAC1 A0 //25
-#define VALVE_OUT_PIN A1 //2 //12   (34)
+#define VALVE_OUT_PIN 32 //2 //12   (34)
 
 #define SIMULATE_SENSORS 0
 
@@ -581,66 +587,6 @@ void InitParameters()
   core_config.P2=1.4;
   core_config.I2=0.4;
   core_config.D2=0;  
-
- /*   core_config.run=true;
-  core_config.constant_rate_mode = false;
-  core_config.inhale_ms = 0;
-  core_config.inhale_ms_extra = 00;
-  core_config.exhale_ms = 0;
-  core_config.pressure_alarm = 100;
-  core_config.pressure_alarm_off = 10;
-  core_config.pressure_forced_inhale_max = 15;
-  core_config.pressure_forced_exhale_min = 10;
-  core_config.pressure_drop = 8;
-  core_config.inhale_critical_alarm_ms = 16000;
-  core_config.exhale_critical_alarm_ms = 16000;
-  core_config.BreathMode = M_BREATH_ASSISTED; //M_BREATH_ASSISTED;//M_BREATH_FORCED;
-  core_config.sim.rate_inhale_pressure=5;
-  core_config.sim.rate_exhale_pressure=10;  
-  core_config.flux_close = 30;
-  core_config.assist_pressure_delta_trigger=0.1;
-  core_config.target_pressure = 25;
-*/
-  
-/*
-    core_config.run=true;
-  core_config.constant_rate_mode = false;
-  core_config.inhale_ms = 750;
-  core_config.inhale_ms_extra = 00;
-  core_config.exhale_ms = 1250;
-  core_config.pressure_alarm = 100;
-  core_config.pressure_alarm_off = 10;
-  core_config.pressure_forced_inhale_max = 15;
-  core_config.pressure_forced_exhale_min = 10;
-  core_config.pressure_drop = 8;
-  core_config.inhale_critical_alarm_ms = 16000;
-  core_config.exhale_critical_alarm_ms = 16000;
-  core_config.BreathMode = M_BREATH_ASSISTED; //M_BREATH_ASSISTED;//M_BREATH_FORCED;
-  core_config.sim.rate_inhale_pressure=5;
-  core_config.sim.rate_exhale_pressure=10;  
-  core_config.flux_close = 30;
-  core_config.assist_pressure_delta_trigger=2;
-  core_config.target_pressure = 30;
-
-  */
-/*
-    core_config.run=true;
-  core_config.constant_rate_mode = false;
-  core_config.inhale_ms = 6000;//2000;
-  core_config.inhale_ms_extra = 500;
-  core_config.exhale_ms = 1000;
-  core_config.pressure_alarm = 100;
-  core_config.pressure_alarm_off = 10;
-  core_config.pressure_forced_inhale_max = 10;
-  core_config.pressure_forced_exhale_min = 3;
-  core_config.pressure_drop = 20;
-  core_config.inhale_critical_alarm_ms = 15000;
-  core_config.exhale_critical_alarm_ms = 15000;
-  core_config.BreathMode = M_BREATH_FORCED; //M_BREATH_ASSISTED
-  core_config.sim.rate_inhale_pressure=5;
-  core_config.sim.rate_exhale_pressure=10;  
-  core_config.flux_close = 25;
-  core_config.assist_pressure_delta_trigger=1.5;*/
 }
 
 void setup(void)
@@ -652,24 +598,14 @@ void setup(void)
   // attach the channel to the GPIO to be controlled
   ledcAttachPin(DAC1, 0);
 
-  ledcWrite(0, 4095);
+  ledcWrite(0, 0);
   pinMode (VALVE_OUT_PIN, OUTPUT);
 
 
   // Start Serial
   Serial.begin(115200);
   Wire.begin();
-  
-  for (int j=0;j<N_PRESSURE_SENSORS;j++)
-  {
-    Reset_5525DSO((int) pressure_sensor_i2c_address [j]);
-  }
 
-  delay(100);
-  for (int j=0;j<N_PRESSURE_SENSORS;j++)
-  {
-    FirstConversion_5525DSO((int) pressure_sensor_i2c_address [j]);
-  }
 
   delay(100);
 
@@ -683,62 +619,27 @@ void setup(void)
 
   CoreTask.attach(TIMERCORE_INTERVAL_MS/1000.0, onTimerCoreTask);
 
-  __service_i2c_detect();
+  for (int i=0;i<8;i++)
+  {
+    i2c_MuxSelect(i);
+    Serial.println("SCAN I2C BUS: " + String(i));
+      __service_i2c_detect();
+  }
+
   
   temperature = 24;
-
-  //rest.variable("temperature",&temperature);
-  rest.variable("pressure",&pressure[0].last_pressure);
-  //rest.variable("flux",&gasflux[0].last_flux);
-  // Function to be exposed
-  rest.function("run",API_RUN_Control);
-  rest.function("inhale_ms",API_SET_inhale_ms);
-  rest.function("exhale_ms",API_SET_exhale_ms);
-  rest.function("inhale_alarm_ms",API_SET_inhale_critical_alarm_ms);
-  rest.function("exhale_alarm_ms",API_SET_exhale_critical_alarm_ms);
-  rest.function("pressure_max",API_SET_pressure_forced_inhale_max);
-  rest.function("pressure_min",API_SET_pressure_forced_exhale_min);
-  rest.function("pressure_drop",API_SET_pressure_drop);
-  rest.function("control_mode",API_SET_control_mode);
-  rest.function("ap_delta_trigger",API_SET_assist_pressure_delta_trigger);
-  rest.function("inhale_ms_extra",API_SET_inhale_ms_extra);
-  rest.function("costant_rate",API_SET_costant_rate);
-
-  // Give name & ID to the device (ID should be 6 characters long)
-  rest.set_id("1");
-  rest.set_name("MVM");
-
-
- 
-  // Connect to WiFi
- /* WiFi.begin((char*)ssid, (char*)password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  i2c_MuxSelect(IIC_MUX_P_FASTLOOP);
+  for (int j=0;j<N_PRESSURE_SENSORS;j++)
+  {
+    Reset_5525DSO((int) pressure_sensor_i2c_address [j]);
   }
-  Serial.println("");
-  Serial.println("WiFi connected");
-*/
 
-  // Connect to Wi-Fi network with SSID and password
-  Serial.print("Setting AP (Access Point)…");
-  // Remove the password parameter, if you want the AP (Access Point) to be open
-  WiFi.softAP(ssid, password);
+  delay(100);
+  for (int j=0;j<N_PRESSURE_SENSORS;j++)
+  {
+    FirstConversion_5525DSO((int) pressure_sensor_i2c_address [j]);
+  }
 
-
-  IPAddress IP = WiFi.softAPIP();
-  Serial.print("AP IP address: ");
-  Serial.println(IP);
-
-  // Print ESP8266 Local IP Address
-  Serial.println(WiFi.localIP());
-  
-  // Start the server
-  server.begin();
-  Serial.println("Server started");
-
-  // Print the IP address
-  Serial.println(WiFi.localIP());
 
   for (int j=0;j<N_PRESSURE_SENSORS;j++)
   {
@@ -763,7 +664,7 @@ void setup(void)
 
 
   //MeasureFluxInit();
-   
+  i2c_MuxSelect(IIC_MUX_FLOW1);
   InitFlowMeter_SFM3019(&sfm3019_inhale);
   Serial.println(" Measure Flow Sensor initialized!");
 
@@ -781,7 +682,7 @@ void setup(void)
   valve_contol(VALVE_IN, VALVE_CLOSE);
   valve_contol(VALVE_OUT, VALVE_CLOSE);
    
-
+  i2c_MuxSelect(IIC_MUX_P_FASTLOOP);
 }
 
 
@@ -1097,7 +998,7 @@ void PressureControlLoop_PRESSIN()
     //if (pid_integral == (4095/PID_I))
       pid_integral=0;
       pid_prec=0;
-      ledcWrite(0, 4095);
+      ledcWrite(0, 0);
   }
   else
   {
@@ -1120,9 +1021,9 @@ void PressureControlLoop_PRESSIN()
     pid_prec = pid_error;
   
     if (Pset==0)
-      ledcWrite(0, 4095);
+      ledcWrite(0, 0);
     else
-      ledcWrite(0, 4095-pid_outb);
+      ledcWrite(0, pid_outb);
   
       
   }
@@ -1134,7 +1035,7 @@ void PressureControlLoop_PRESSIN()
 }
 
 void loop() {
-  static WiFiClient client;
+  
   static uint32_t last_loop_time;
   static uint8_t RestStateMachine =0;
   static int serverhanging = 0; // Used to monitor how long the client is hanging
@@ -1170,6 +1071,7 @@ void loop() {
     //{
     // 
     //}
+    i2c_MuxSelect(IIC_MUX_FLOW1);
     MeasureFlux_SFM3019(&sfm3019_inhale, &flux);
 
     gasflux[0].last_flux = flux; //gasflux[0].last_flux * 0.5 + (0.5*flux);
@@ -1185,7 +1087,7 @@ void loop() {
       fluxpeak = fluxpeak > gasflux[0].last_flux ? fluxpeak : gasflux[0].last_flux;
       dgb_peaktime = fluxpeak;
  
-    
+      i2c_MuxSelect(IIC_MUX_P_FASTLOOP);
   }
 
     //DBG_print(1,String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(PIDMonitor/2) + "," + String(valve2_status)+"," +
