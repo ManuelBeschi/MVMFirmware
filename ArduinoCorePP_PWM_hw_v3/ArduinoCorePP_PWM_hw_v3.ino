@@ -156,6 +156,19 @@ typedef struct
   float ZERO;
 } t_5525DSO_calibration_table;
 
+typedef struct
+{
+  float FLUX;
+  float TidalVolume;
+  float InspVolumeSensirion;
+  float InspVolumeVenturi;
+  float TidalCorrection;
+  int TidalStatus;
+  float ExpVolumeVenturi;
+  float AutoZero;
+} t_tidal_volume_c;
+
+t_tidal_volume_c tidal_volume_c;
 
 uint8_t pressure_sensor_i2c_address [] = {0x76, 0x77, 0x76, 0x77};
 uint8_t pressure_sensor_i2c_mux [] = {IIC_MUX_P_FASTLOOP, IIC_MUX_P_FASTLOOP, IIC_MUX_P_2, IIC_MUX_P_2};
@@ -203,6 +216,10 @@ bool MeasureFluxReadOffsetScale3019(uint8_t address, int16_t* flow_scale, int16_
 bool MeasureFlux_SFM3019(SfmConfig *sfm3019, float *Flow);
 bool InitFlowMeter_SFM3019(SfmConfig *sfm3019);
 void i2c_MuxSelect(uint8_t i);
+
+void TidalReset();
+void TidalInhale();
+void TidalExhale();
 
 
 int valve1_status = 0;
@@ -326,12 +343,15 @@ void  onTimerCoreTask(){
       switch(core_sm_context.force_sm)
       {
         case FR_OPEN_INVALVE:
+          TidalReset();
           dbg_state_machine =0;
           if (core_config.run)
           {
               
             if (core_config.BreathMode == M_BREATH_FORCED)
             {
+               TidalInhale();
+
                fluxpeak=0;
                 peaktime=millis();
               //FORCE BREATHING MODE
@@ -359,6 +379,9 @@ void  onTimerCoreTask(){
               
               if ((-1.0*delta2) > core_config.assist_pressure_delta_trigger)
               {
+
+                TidalInhale();
+          
                 dbg_trigger=1;
                 fluxpeak=0;
                 peaktime=0;
@@ -431,6 +454,8 @@ void  onTimerCoreTask(){
             // ||
             //(core_sm_context.timer1> (core_config.inhale_ms/TIMERCORE_INTERVAL_MS)) )
             {
+
+              TidalExhale();
               valve_contol(VALVE_IN, VALVE_CLOSE);
               valve_contol(VALVE_OUT, VALVE_OPEN);
               CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_TIME);
@@ -451,6 +476,7 @@ void  onTimerCoreTask(){
                core_sm_context.timer1 =0;
               if (core_config.constant_rate_mode)
               {
+                 TidalExhale();
                 valve_contol(VALVE_IN, VALVE_CLOSE);
                 valve_contol(VALVE_OUT, VALVE_OPEN);
                 
@@ -593,6 +619,7 @@ void InitParameters()
   core_config.D2=0;  
 
   core_config.pid_limit=0.65;
+  tidal_volume_c.AutoZero =1;
 }
 
 void setup(void)
@@ -863,6 +890,7 @@ void SetCommandCallback(cmd* c) {
       Serial.println("valore=OK");
     }
     
+    
 }
 
 
@@ -923,6 +951,17 @@ void GetCommandCallback(cmd* c) {
         }
            Serial.println(" "); 
     }
+
+    if (strPatam == "calibv")
+    {
+      if (fabs(tidal_volume_c.ExpVolumeVenturi) > 0)
+         tidal_volume_c.AutoZero = fabs(tidal_volume_c.InspVolumeVenturi) / fabs(tidal_volume_c.ExpVolumeVenturi);
+
+       Serial.println("valore=" + String(tidal_volume_c.InspVolumeVenturi)+ "," + String(tidal_volume_c.ExpVolumeVenturi) + "," + String(tidal_volume_c.AutoZero));
+    }
+
+
+    
 
 }
 
@@ -1111,7 +1150,36 @@ void loop() {
     float dp, vf;
     dp = pressure[2].last_pressure;
     vf= 0.1513 * (dp*dp*dp) - 3.3424 * (dp*dp) + 41.657*dp;
-    VenturiFlux = 0.4*VenturiFlux + 0.6 * vf;
+    VenturiFlux = 0.8*VenturiFlux + 0.2 * vf;
+
+
+      
+    switch(tidal_volume_c.TidalStatus)
+    {
+      case 0:
+        tidal_volume_c.TidalVolume=0;
+        tidal_volume_c.InspVolumeSensirion=0;
+        tidal_volume_c.InspVolumeVenturi=0;
+        tidal_volume_c.TidalCorrection=1;
+        tidal_volume_c.FLUX = gasflux[0].last_flux;
+        break;
+      case 1:
+        tidal_volume_c.TidalVolume+=gasflux[0].last_flux;
+        tidal_volume_c.InspVolumeSensirion+=gasflux[0].last_flux;
+        tidal_volume_c.InspVolumeVenturi+=vf;
+        tidal_volume_c.FLUX = gasflux[0].last_flux;
+        break;     
+        
+      case 2:
+        tidal_volume_c.ExpVolumeVenturi += vf;
+        if (tidal_volume_c.TidalCorrection>0)
+        {
+          tidal_volume_c.TidalVolume+= (vf  /  tidal_volume_c.TidalCorrection) * tidal_volume_c.AutoZero;
+          tidal_volume_c.FLUX = (VenturiFlux /  tidal_volume_c.TidalCorrection);
+        }
+       break;   
+    }
+
       i2c_MuxSelect(IIC_MUX_P_FASTLOOP);
   }
 
@@ -1121,7 +1189,7 @@ void loop() {
 
   if (GUI_MODE==0)
     DBG_print(1,String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(pressure[1].last_pressure)+ ","  + String(PIDMonitor*100/4096) +  ","  + String(PIDMonitor2) + "," + String(valve2_status)+ "," + 
-     String(VenturiFlux));
+     String(VenturiFlux) + "," + String(tidal_volume_c.FLUX) + "," + String(tidal_volume_c.TidalVolume*0.02));
      //String(dgb_delta*100) + "," + String(dbg_trigger*50));
     
   if (Serial.available()) {
@@ -1714,4 +1782,31 @@ void i2c_MuxSelect(uint8_t i) {
   Wire.beginTransmission(TCAADDR);
   Wire.write(1 << i);
   Wire.endTransmission();  
+}
+
+
+
+void TidalReset()
+{
+    tidal_volume_c.TidalStatus=0;
+    tidal_volume_c.TidalVolume=0;
+    tidal_volume_c.InspVolumeSensirion=0;
+    tidal_volume_c.InspVolumeVenturi=0;
+    tidal_volume_c.ExpVolumeVenturi=0;
+    tidal_volume_c.TidalCorrection=1;
+    tidal_volume_c.TidalStatus=0;
+}
+void TidalInhale()
+{
+  tidal_volume_c.TidalStatus=1;
+}
+
+void TidalExhale()
+{
+  if (tidal_volume_c.InspVolumeSensirion>0)
+    tidal_volume_c.TidalCorrection=tidal_volume_c.InspVolumeVenturi/tidal_volume_c.InspVolumeSensirion;  
+  else
+    tidal_volume_c.TidalCorrection=1;
+    
+  tidal_volume_c.TidalStatus=2;
 }
