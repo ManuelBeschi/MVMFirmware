@@ -33,7 +33,7 @@
 #define VERBOSE_LEVEL 1
 #define LISTEN_PORT           80
 
-#define N_PRESSURE_SENSORS 2
+#define N_PRESSURE_SENSORS 4
 
 #define TIMERCORE_INTERVAL_MS  100   
 //100 
@@ -117,6 +117,8 @@ struct
 
   bool pause_inhale;
   bool pause_exhale;
+
+  float pid_limit;
   
 } core_config;
 
@@ -128,7 +130,7 @@ typedef struct
   float last_pressure;
   long  read_millis;
 } t_pressure;
-t_pressure pressure[2];
+t_pressure pressure[N_PRESSURE_SENSORS];
 
 typedef struct
 {
@@ -155,7 +157,9 @@ typedef struct
 } t_5525DSO_calibration_table;
 
 
-uint8_t pressure_sensor_i2c_address [] = {0x76, 0x77};
+uint8_t pressure_sensor_i2c_address [] = {0x76, 0x77, 0x76, 0x77};
+uint8_t pressure_sensor_i2c_mux [] = {IIC_MUX_P_FASTLOOP, IIC_MUX_P_FASTLOOP, IIC_MUX_P_2, IIC_MUX_P_2};
+
 uint8_t flow_sensor_i2c_address [] = {0x40};
 t_5525DSO_calibration_table PRES_SENS_CT[N_PRESSURE_SENSORS];
 
@@ -587,6 +591,8 @@ void InitParameters()
   core_config.P2=1.4;
   core_config.I2=0.4;
   core_config.D2=0;  
+
+  core_config.pid_limit=0.65;
 }
 
 void setup(void)
@@ -628,21 +634,24 @@ void setup(void)
 
   
   temperature = 24;
-  i2c_MuxSelect(IIC_MUX_P_FASTLOOP);
+
   for (int j=0;j<N_PRESSURE_SENSORS;j++)
   {
+    i2c_MuxSelect(pressure_sensor_i2c_mux[j]);
     Reset_5525DSO((int) pressure_sensor_i2c_address [j]);
   }
 
   delay(100);
   for (int j=0;j<N_PRESSURE_SENSORS;j++)
   {
+    i2c_MuxSelect(pressure_sensor_i2c_mux[j]);
     FirstConversion_5525DSO((int) pressure_sensor_i2c_address [j]);
   }
 
 
   for (int j=0;j<N_PRESSURE_SENSORS;j++)
   {
+    i2c_MuxSelect(pressure_sensor_i2c_mux[j]);
     ReadCalibration_5525DSO( (int) pressure_sensor_i2c_address [j], &PRES_SENS_CT[j]);
     Serial.print("SENSOR:           ");   Serial.println(j);
     Serial.print("SENS_T1:          ");   Serial.println(PRES_SENS_CT[j].C[0]);
@@ -846,6 +855,14 @@ void SetCommandCallback(cmd* c) {
       core_config.pause_exhale = numberValue;
       Serial.println("valore=OK");
     }
+
+    if (strPatam == "pid_limit")
+    {
+      float numberValue = value.getValue().toFloat();
+      core_config.pid_limit = numberValue;
+      Serial.println("valore=OK");
+    }
+    
 }
 
 
@@ -892,7 +909,7 @@ void GetCommandCallback(cmd* c) {
       Serial.print("Valore=" );
         for (int j=0;j<N_PRESSURE_SENSORS;j++)
         {
-         
+         i2c_MuxSelect(pressure_sensor_i2c_mux[j]);
           float mean=0;
           PRES_SENS_CT[j].ZERO = 0;
           for (int q=0;q<100;q++)
@@ -902,7 +919,7 @@ void GetCommandCallback(cmd* c) {
           }
           PRES_SENS_CT[j].ZERO = mean/100;
 
-           Serial.print(String(PRES_SENS_CT[0].ZERO)+ ",");
+           Serial.print(String(PRES_SENS_CT[j].ZERO)+ ",");
         }
            Serial.println(" "); 
     }
@@ -956,7 +973,7 @@ void PressureControlLoop_PRESSIN_SLOW()
  
     pid_outb = pid_out;
     
-    if (pid_outb<Pset2*0.75) pid_outb=Pset2*0.75;
+    if (pid_outb<Pset2*core_config.pid_limit) pid_outb=Pset2*core_config.pid_limit;
     if (pid_outb>50) pid_outb=50;
   
     pid_prec = pid_error;
@@ -1015,7 +1032,7 @@ void PressureControlLoop_PRESSIN()
     //pid_outb = pid_outb * 0.8 + pid_out*0.2;
     pid_outb = pid_out;
     if (pid_outb<0) pid_outb=0;
-     pid_outb = pid_outb + 1000;
+     pid_outb = pid_outb + 500;
     if (pid_outb>4090) pid_outb=4090;
   
     pid_prec = pid_error;
@@ -1035,7 +1052,7 @@ void PressureControlLoop_PRESSIN()
 }
 
 void loop() {
-  
+  static float VenturiFlux;
   static uint32_t last_loop_time;
   static uint8_t RestStateMachine =0;
   static int serverhanging = 0; // Used to monitor how long the client is hanging
@@ -1084,18 +1101,28 @@ void loop() {
     
     //if (millis()-peaktime<1000)
   
-      fluxpeak = fluxpeak > gasflux[0].last_flux ? fluxpeak : gasflux[0].last_flux;
-      dgb_peaktime = fluxpeak;
- 
+    fluxpeak = fluxpeak > gasflux[0].last_flux ? fluxpeak : gasflux[0].last_flux;
+    dgb_peaktime = fluxpeak;
+
+    i2c_MuxSelect(pressure_sensor_i2c_mux[2]);
+    if (read_pressure_sensor(2)!= 0)
+    {
+    }
+    float dp, vf;
+    dp = pressure[2].last_pressure;
+    vf= 0.1513 * (dp*dp*dp) - 3.3424 * (dp*dp) + 41.657*dp;
+    VenturiFlux = 0.4*VenturiFlux + 0.6 * vf;
       i2c_MuxSelect(IIC_MUX_P_FASTLOOP);
   }
 
     //DBG_print(1,String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(PIDMonitor/2) + "," + String(valve2_status)+"," +
     //String(dbg_state_machine*10)+"," + String(dgb_delta*100) + "," + String(dbg_trigger*50)+ "," + String(dgb_peaktime));
-  
+
+
   if (GUI_MODE==0)
     DBG_print(1,String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(pressure[1].last_pressure)+ ","  + String(PIDMonitor*100/4096) +  ","  + String(PIDMonitor2) + "," + String(valve2_status)+ "," + 
-     String(dgb_delta*100) + "," + String(dbg_trigger*50));
+     String(VenturiFlux));
+     //String(dgb_delta*100) + "," + String(dbg_trigger*50));
     
   if (Serial.available()) {
         // Read out string from the serial monitor
