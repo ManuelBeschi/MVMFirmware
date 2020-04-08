@@ -1,3 +1,5 @@
+#define _FIRMWARE_VERSION_ "HW_V3_2020_04_08_00"
+
 //PID  
 //resistenza 5- 20
 //core_config.P=12.8;
@@ -9,9 +11,7 @@
 //core_config.I=4;
 //core_config.D=0;
 
-//#include <ESP8266WiFi.h>
-#include <WiFi.h>
-#include <aREST.h>
+
 #include <Ticker.h>  //Ticker Library
 #include <Wire.h>
 #include <math.h>
@@ -26,16 +26,13 @@
 #define IIC_MUX_P_2 5
 #define IIC_MUX_P_3 6
 
-#define GUI_MODE 0
-#define MODE_PEEP 1
-
 
 #define VERBOSE_LEVEL 1
 #define LISTEN_PORT           80
 
 #define N_PRESSURE_SENSORS 4
 
-#define TIMERCORE_INTERVAL_MS  100   
+#define TIMERCORE_INTERVAL_MS  10  
 //100 
 
 #define VALVE_CLOSE 0
@@ -49,23 +46,61 @@
 #define SIMULATE_SENSORS 0
 
 
-typedef enum {FR_OPEN_INVALVE, FR_WAIT_INHALE_PRESSURE, FR_WAIT_INHALE_PRESSURE_EXTRA, FR_WAIT_INHALE_TIME, FR_OPEN_OUTVALVE, FR_WAIT_EXHALE_PRESSURE, FR_WAIT_EXHALE_PRESSURE_EXTRA, FR_WAIT_EXHALE_TIME} t_core__force_sm;
-typedef enum {ALARM_NO_INHALE_PRESSURE_IN_TIME, ALARM_NO_EXHALE_PRESSURE_IN_TIME, PRESSURE_DROP_INHALE, UNABLE_TO_READ_SENSOR_PRESSURE, ALARM_PRESSURE_TO_HIGH} t_ALARM;
+
+
+#define __ERROR_INPUT_PRESSURE_LOW      0
+#define __ERROR_INPUT_PRESSURE_HIGH     1
+#define __ERROR_INSIDE_PRESSURE_LOW     2
+#define __ERROR_INSIDE_PRESSURE_HIGH    3
+#define __ERROR_BATTERY_LOW             4
+#define __ERROR_LEAKAGE                 5
+#define __ERROR_FULL_OCCLUSION          6
+#define __ERROR_PARTIAL_OCCLUSION       7
+#define __ERROR_SYSTEM_FALIURE          31
+
+uint32_t ALARM_FLAG = 0x0;
+
+typedef enum {
+  FR_OPEN_INVALVE, 
+  FR_WAIT_INHALE_PRESSURE, 
+  FR_WAIT_INHALE_PRESSURE_EXTRA, 
+  FR_WAIT_INHALE_TIME, 
+  FR_OPEN_OUTVALVE, 
+  FR_WAIT_EXHALE_PRESSURE, 
+  FR_WAIT_EXHALE_PRESSURE_EXTRA, 
+  FR_WAIT_EXHALE_TIME
+  } t_core__force_sm;
+  
+typedef enum {
+  PRESSURE_DROP_INHALE, 
+  UNABLE_TO_READ_SENSOR_PRESSURE, 
+  UNABLE_TO_READ_SENSOR_FLUX,
+  UNABLE_TO_READ_SENSOR_VENTURI,
+  ALARM_COMPLETE_OCCLUSION,
+  ALARM_PARTIAL_OCCLUSION,
+  ALARM_PRESSURE_INSIDE_TOO_HIGH,
+  ALARM_PRESSURE_INSIDE_TOO_LOW,
+  ALARM_LEAKAGE,
+  BATTERY_LOW,
+  ALARM_PRESSURE_INPUT_TOO_LOW,
+  ALARM_PRESSURE_INPUT_TOO_HIGH,
+  ALARM_GUI_ALARM,
+  ALARM_GUI_WDOG
+
+  } t_ALARM;
 typedef enum {VALVE_IN, VALVE_OUT} valves;
 
 
-// WiFi parameters
-const char* ssid = "test";
-const char* password =  "alchimista";
+bool __WDENABLE=false;
+bool __CONSOLE_MODE=false;
+bool __ADDTimeStamp=true;
+uint32_t watchdog_time =0;
 
 // The port to listen for incoming TCP connections
 
 
 Ticker CoreTask;
 // Create aREST instance
-aREST rest = aREST();
-// Create an instance of the server
-WiFiServer server(LISTEN_PORT);
 
 // Create CLI Object
 SimpleCLI cli;
@@ -74,7 +109,7 @@ Command param_set;
 Command param_get;
 
 // Variables to be exposed to the API
-float temperature;
+
 bool in_pressure_alarm=false;
 
 typedef enum {M_BREATH_FORCED, M_BREATH_ASSISTED} t_assist_mode;
@@ -213,7 +248,7 @@ void MeasureFluxInit3019(uint8_t address);
 bool MeasureFluxReadOffsetScale3019(uint8_t address, int16_t* flow_scale, int16_t* flow_offset, uint16_t* unit);
 
 
-bool MeasureFlux_SFM3019(SfmConfig *sfm3019, float *Flow);
+bool MeasureFlux_SFM3019(SfmConfig *sfm3019, float *Flow, float *T);
 bool InitFlowMeter_SFM3019(SfmConfig *sfm3019);
 void i2c_MuxSelect(uint8_t i);
 
@@ -232,7 +267,18 @@ float PIDMonitor2 = 0;
 
 bool peep_look=false;
 
+float last_peep=0;
+float last_bpm=0;
+float averaged_bpm=0;
+float temperature=0;    
+
+
 float CURRENT_PSET=0;
+
+
+bool  batteryPowered=false;
+float currentBatteryCharge=0;
+float last_peep=0;
 
 SfmConfig sfm3019_inhale;
   
@@ -249,37 +295,143 @@ void CoreSM_FORCE_ChangeState(t_core__force_sm *sm, t_core__force_sm NEW_STATE)
   *sm = NEW_STATE;
 }
 
+uint32_t GenerateFlag(int alarm_code)
+{
+  return (1<<alarm_code);
+}
+
 void TriggerAlarm(t_ALARM Alarm)
 {
-  return;
+
   switch(Alarm)
   {
-    case ALARM_NO_INHALE_PRESSURE_IN_TIME:
-      DBG_print(0,"ALARM @ " + String(millis()) + " ALARM_NO_INHALE_PRESSURE_IN_TIME");
-    break;
-
-    case ALARM_NO_EXHALE_PRESSURE_IN_TIME:
-      DBG_print(0,"ALARM @ " + String(millis()) + " ALARM_NO_EXHALE_PRESSURE_IN_TIME");
-    break;
-
     case PRESSURE_DROP_INHALE:
-      DBG_print(0,"ALARM @ " + String(millis()) + " PRESSURE_DROP_INHALE");
+      DBG_print(2,"ALARM @ " + String(millis()) + " PRESSURE_DROP_INHALE");
+      ALARM_FLAG = ALARM_FLAG | GenerateFlag(__ERROR_LEAKAGE);
     break;
-    
+
     case UNABLE_TO_READ_SENSOR_PRESSURE:
-      DBG_print(0,"ALARM @ " + String(millis()) + " UNABLE_TO_READ_SENSOR_PRESSURE");
+      DBG_print(2,"ALARM @ " + String(millis()) + " UNABLE_TO_READ_SENSOR_PRESSURE");
+      ALARM_FLAG = ALARM_FLAG | GenerateFlag(__ERROR_SYSTEM_FALIURE);
+    break;    
+
+    case UNABLE_TO_READ_SENSOR_FLUX:
+      DBG_print(2,"ALARM @ " + String(millis()) + " UNABLE_TO_READ_SENSOR_FLUX");
+      ALARM_FLAG = ALARM_FLAG | GenerateFlag(__ERROR_SYSTEM_FALIURE);
+    break; 
+
+    case UNABLE_TO_READ_SENSOR_VENTURI:
+      DBG_print(2,"ALARM @ " + String(millis()) + " UNABLE_TO_READ_SENSOR_VENTURI");
+      ALARM_FLAG = ALARM_FLAG | GenerateFlag(__ERROR_SYSTEM_FALIURE);
+    break;     
+
+    case ALARM_COMPLETE_OCCLUSION:
+      DBG_print(2,"ALARM @ " + String(millis()) + " ALARM_COMPLETE_OCCLUSION");
+      ALARM_FLAG = ALARM_FLAG | GenerateFlag(__ERROR_FULL_OCCLUSION);
+    break;  
+
+    case ALARM_PARTIAL_OCCLUSION:
+      DBG_print(2,"ALARM @ " + String(millis()) + " ALARM_PARTIAL_OCCLUSION");
+      ALARM_FLAG = ALARM_FLAG | GenerateFlag(__ERROR_PARTIAL_OCCLUSION);
+    break;      
+
+    case ALARM_PRESSURE_INSIDE_TOO_HIGH:
+      DBG_print(2,"ALARM @ " + String(millis()) + " ALARM_PRESSURE_INSIDE_TOO_HIGH");
+      ALARM_FLAG = ALARM_FLAG | GenerateFlag(__ERROR_INSIDE_PRESSURE_LOW);
+    break;  
+
+    case ALARM_PRESSURE_INSIDE_TOO_LOW:
+      DBG_print(2,"ALARM @ " + String(millis()) + " ALARM_PRESSURE_INSIDE_TOO_LOW");
+      ALARM_FLAG = ALARM_FLAG | GenerateFlag(__ERROR_INSIDE_PRESSURE_HIGH);
+    break;        
+
+    case ALARM_LEAKAGE:
+      DBG_print(2,"ALARM @ " + String(millis()) + " ALARM_LEAKAGE");
+      ALARM_FLAG = ALARM_FLAG | GenerateFlag(__ERROR_LEAKAGE);
+    break;         
+
+    case BATTERY_LOW:
+      DBG_print(2,"ALARM @ " + String(millis()) + " BATTERY_LOW");
+      ALARM_FLAG = ALARM_FLAG | GenerateFlag(__ERROR_BATTERY_LOW);
+    break;   
+            
+    case ALARM_PRESSURE_INPUT_TOO_LOW:
+      DBG_print(2,"ALARM @ " + String(millis()) + " ALARM_PRESSURE_INPUT_TOO_LOW");
+      ALARM_FLAG = ALARM_FLAG | GenerateFlag(__ERROR_INPUT_PRESSURE_LOW);
+    break; 
+
+    case ALARM_PRESSURE_INPUT_TOO_HIGH:
+      DBG_print(2,"ALARM @ " + String(millis()) + " ALARM_PRESSURE_INPUT_TOO_HIGH");
+      ALARM_FLAG = ALARM_FLAG | GenerateFlag(__ERROR_INPUT_PRESSURE_HIGH);
+    break;     
+
+    case ALARM_GUI_ALARM:
+      DBG_print(2,"ALARM @ " + String(millis()) + " ALARM_GUI_ALARM");
     break;
 
-    case ALARM_PRESSURE_TO_HIGH:
-      DBG_print(0,"ALARM @ " + String(millis()) + " ALARM_PRESSURE_TO_HIGH");
+    case ALARM_GUI_WDOG:
+      DBG_print(2,"ALARM @ " + String(millis()) + " ALARM_WDOG");
     break;
-
-    
-    
+        
     default:
 
     break;
   }
+}
+
+
+void ResetAlarm(int alarm_code)
+{
+  ALARM_FLAG = ALARM_FLAG & (!GenerateFlag(alarm_code));
+}
+
+void CheckAlarmConditions(t_core__force_sm sm)
+{
+  static t_core__force_sm last_sm;
+ 
+
+
+  //Over Pressure Input
+  
+  //Under Pressure Input
+
+  //Over Pressure Inside
+  if (pressure[0].last_pressure > 50)
+    TriggerAlarm(ALARM_PRESSURE_INSIDE_TOO_HIGH);
+    
+  //Under Pressure Inside
+  if ((last_sm == FR_WAIT_INHALE_TIME) && (sm != last_sm))
+  {
+    if (pressure[0].last_pressure < 0.5 * core_config.target_pressure)
+      TriggerAlarm(ALARM_PRESSURE_INSIDE_TOO_LOW);
+  }
+  //leakage
+  if ((last_sm == FR_WAIT_INHALE_TIME) && (sm != last_sm))
+  {
+    if (pressure[1].last_pressure < 0.8 * core_config.target_pressure)
+      TriggerAlarm(ALARM_LEAKAGE);
+  }
+    
+  //Occlusion complete 
+  if ((last_sm == FR_WAIT_INHALE_TIME) && (sm != last_sm))
+  {
+    if (fabs(pressure[1].last_pressure-pressure[0].last_pressure)< 0.2 * core_config.target_pressure )
+      TriggerAlarm(ALARM_COMPLETE_OCCLUSION);
+  }
+  
+  //Occlusion partial
+  if ((last_sm == FR_WAIT_INHALE_TIME) && (sm != last_sm))
+  {
+    if (fabs(pressure[1].last_pressure-pressure[0].last_pressure)< 0.8 * core_config.target_pressure )
+      TriggerAlarm(ALARM_PARTIAL_OCCLUSION);
+  }
+
+  if (currentBatteryCharge<20)
+    TriggerAlarm(BATTERY_LOW);
+
+
+  last_sm = sm;
+  
 }
 
 int dbg_state_machine =0;
@@ -292,34 +444,39 @@ unsigned long peaktime=0;
 float pplow=0;
   
 void  onTimerCoreTask(){
-  static float old_pressure[5];
+  static float old_pressure[15];
   static float old_delta;
    
   static float pplow_old;
 
+  static int timer_divider =0;
 
   
                 
-  float delta =  pplow -  pplow_old ;
-  float delta2 = delta-old_delta;
-              
-  pplow_old = pplow;
-  old_delta = delta;
-  dgb_delta=delta2;  
+  static float delta =  0;
+  static float delta2 = 0;
+  static last_start = 0;
+
+  if (++timer_divider>=100/TIMERCORE_INTERVAL_MS)
+  {
+                    
+    delta =  pplow -  pplow_old ;
+    delta2 = delta-old_delta;
+    pplow_old = pplow;
+    old_delta = delta;
+    dgb_delta=delta2; 
+  } 
   
   DBG_print(10,"ITimer0: millis() = " + String(millis()));
-  
-  old_pressure[4] = old_pressure[3];
-  old_pressure[3] = old_pressure[2];
-  old_pressure[2] = old_pressure[1];
-  old_pressure[1] = old_pressure[0];
-  old_pressure[0] = pressure[0].last_pressure;
 
-  float mean = (old_pressure[1] + old_pressure[2] + old_pressure[3])/3.0;
-  //This is the core of the ventialtor.
-  //This section must work inside a SO timer and must be called every 0.1 seconds
-  //if (core_config.BreathMode == M_BREATH_FORCED)
-  //{
+  for (int q=0;q<14;q++)
+  {
+    old_pressure[14-q] = old_pressure[13-q];
+  }
+  old_pressure[0] = pressure[1].last_pressure;
+
+  float mean_peep = (old_pressure[5] + old_pressure[6] + old_pressure[7] + old_pressure[8]+ old_pressure[9])/5.0;
+
     core_sm_context.timer1++;
     core_sm_context.timer2++;
     
@@ -327,19 +484,7 @@ void  onTimerCoreTask(){
     
     SimulationFunction();
 
-    if (mean <= core_config.pressure_alarm_off)
-    {
-       in_pressure_alarm=false;
-    }
-    if ( (mean >= core_config.pressure_alarm) || (in_pressure_alarm==true))
-    {
-      TriggerAlarm(ALARM_PRESSURE_TO_HIGH);
-      valve_contol(VALVE_IN, VALVE_CLOSE);
-      valve_contol(VALVE_OUT, VALVE_OPEN);
-      in_pressure_alarm=true;
-    }
-    else
-    {
+  
       switch(core_sm_context.force_sm)
       {
         case FR_OPEN_INVALVE:
@@ -350,13 +495,22 @@ void  onTimerCoreTask(){
               
             if (core_config.BreathMode == M_BREATH_FORCED)
             {
+              last_peep = mean_peep;
+              last_start=millis();
+
+              float last_delta_time = millis() - last_start();
+              if (last_delta_time > 0)
+              {
+                last_bpm = 60.0/last_delta_time;
+              }
+                
                TidalInhale();
 
                fluxpeak=0;
                 peaktime=millis();
               //FORCE BREATHING MODE
               DBG_print(3,"FR_OPEN_INVALVE");
-               core_sm_context.timer1 =0;
+               core_sm_context.timer1 =1;
                CURRENT_PSET = core_config.target_pressure;
               valve_contol(VALVE_IN, VALVE_OPEN);
               
@@ -379,7 +533,16 @@ void  onTimerCoreTask(){
               
               if ((-1.0*delta2) > core_config.assist_pressure_delta_trigger)
               {
-
+                last_peep = mean_peep;
+                last_start=millis();
+  
+                float last_delta_time = millis() - last_start();
+                if (last_delta_time > 0)
+                {
+                  last_bpm = 60.0/last_delta_time;
+                  averaged_bpm = averaged_bpm*0.6 + last_bpm;
+                }
+                
                 TidalInhale();
           
                 dbg_trigger=1;
@@ -388,12 +551,12 @@ void  onTimerCoreTask(){
                 DBG_print(3,"FR_OPEN_INVALVE");
                 valve_contol(VALVE_IN, VALVE_OPEN);
                 valve_contol(VALVE_OUT, VALVE_CLOSE);
-                 core_sm_context.timer1 =0;
+                 core_sm_context.timer1 =1;
                 if (core_config.constant_rate_mode)
                   CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_TIME);
                 else
                   CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_PRESSURE);
-                core_sm_context.timer1 =0;
+     
                 DBG_print(3,"FR_WAIT_INHALE_PRESSURE");                
               }
             }
@@ -414,82 +577,43 @@ void  onTimerCoreTask(){
          }
               
           dbg_state_machine =1;
-          /*if (pressure[0].last_pressure >= core_config.pressure_forced_inhale_max)
-          {
-            //if (core_config.inhale_ms_extra>0)
-            //{
-              core_sm_context.timer2 = 0; 
-              core_sm_context.timer1 =0;
-              CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_PRESSURE_EXTRA);
-              DBG_print(3,"FR_WAIT_INHALE_PRESSURE_EXTRA");             
-            //}
-            //else
-            //{
-  
-            //  valve_contol(VALVE_IN, VALVE_CLOSE);
-            //  CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_TIME);
-            //  DBG_print(3,"FR_WAIT_INHALE_TIME");            
-            //}
-          }
-          else
-          {
-            if (core_sm_context.timer1 >= (core_config.inhale_critical_alarm_ms/TIMERCORE_INTERVAL_MS))
-            {
-              TriggerAlarm(ALARM_NO_INHALE_PRESSURE_IN_TIME);
-              valve_contol(VALVE_IN, VALVE_CLOSE);
-              CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_OUTVALVE);
-              DBG_print(3,"FR_OPEN_OUTVALVE");
-            }
-          }
-          */
+         
           
           break;
   
         case FR_WAIT_INHALE_PRESSURE_EXTRA:
             dbg_state_machine =2;
-            //if ( (core_sm_context.timer2> (core_config.inhale_ms_extra/TIMERCORE_INTERVAL_MS)) ||
-            //(core_sm_context.timer1> (core_config.inhale_ms/TIMERCORE_INTERVAL_MS)) )
-            if ( (gasflux[0].last_flux <= (core_config.flux_close * fluxpeak)/100.0 ) && (core_config.pause_inhale==false))
-            
-            // ||
-            //(core_sm_context.timer1> (core_config.inhale_ms/TIMERCORE_INTERVAL_MS)) )
-            {
 
+            if ( (gasflux[0].last_flux <= (core_config.flux_close * fluxpeak)/100.0 ) && (core_config.pause_inhale==false))
+            {
               TidalExhale();
               valve_contol(VALVE_IN, VALVE_CLOSE);
               valve_contol(VALVE_OUT, VALVE_OPEN);
               CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_INHALE_TIME);
               DBG_print(3,"FR_OPEN_OUTVALVE");
-
-            }
-            else
-            {        
-                       
             }
           break;
           
         case FR_WAIT_INHALE_TIME:
             dbg_state_machine =3;
-            if ((core_sm_context.timer1> (core_config.inhale_ms/TIMERCORE_INTERVAL_MS)) && (core_config.pause_inhale==false))
+            if ((core_sm_context.timer1>= (core_config.inhale_ms/TIMERCORE_INTERVAL_MS)) && (core_config.pause_inhale==false))
             {
-              CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_OUTVALVE);
+             
                core_sm_context.timer1 =0;
               if (core_config.constant_rate_mode)
               {
                  TidalExhale();
                 valve_contol(VALVE_IN, VALVE_CLOSE);
                 valve_contol(VALVE_OUT, VALVE_OPEN);
-                
+                CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_TIME);
+              }
+              else
+              {
+                 CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_OUTVALVE);
               }
               DBG_print(3,"FR_OPEN_OUTVALVE");
             }
-            else
-            {
-              if (pressure[0].last_pressure <= core_config.pressure_drop)
-              {
-                TriggerAlarm(PRESSURE_DROP_INHALE);
-              }
-            }
+
           break;
         
         case FR_OPEN_OUTVALVE:
@@ -516,7 +640,6 @@ void  onTimerCoreTask(){
           
           if (core_sm_context.timer2  > 300/TIMERCORE_INTERVAL_MS)
           {
- //           valve_contol(VALVE_OUT, VALVE_CLOSE);
             if (core_config.BreathMode == M_BREATH_FORCED)
             {
                 CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_WAIT_EXHALE_TIME);
@@ -525,27 +648,16 @@ void  onTimerCoreTask(){
             {
                 CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_INVALVE);  
             }
-              
-            
             core_sm_context.timer1 =0;
             DBG_print(3,"FR_WAIT_EXHALE_TIME");
           }
-          else
-          {
-            if (core_sm_context.timer1 >= (core_config.exhale_critical_alarm_ms/TIMERCORE_INTERVAL_MS))
-            {
-              TriggerAlarm(ALARM_NO_EXHALE_PRESSURE_IN_TIME);
-              valve_contol(VALVE_OUT, VALVE_CLOSE);
-              CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_INVALVE);
-              DBG_print(3,"FR_OPEN_INVALVE");
-            }
-          }
+         
           break;
   
         case FR_WAIT_EXHALE_TIME:
           dbg_state_machine =6;
            
-          if ((core_sm_context.timer1> (core_config.exhale_ms/TIMERCORE_INTERVAL_MS)) && (core_config.pause_exhale==false))
+          if ((core_sm_context.timer1>= (core_config.exhale_ms/TIMERCORE_INTERVAL_MS)) && (core_config.pause_exhale==false))
           {
             peep_look=false;
             if (core_config.BreathMode == M_BREATH_FORCED)
@@ -562,19 +674,9 @@ void  onTimerCoreTask(){
           CoreSM_FORCE_ChangeState(&core_sm_context.force_sm, FR_OPEN_INVALVE);
           break;
       }
-    }
- /* }
-  else
-  {
-    if (core_config.BreathMode == M_BREATH_ASSISTED)  
-    {
-      
-    }
-    else
-    {
-      
-    }
-  }*/
+   
+    CheckAlarmConditions(core_sm_context.force_sm);
+
 
       
 
@@ -660,8 +762,7 @@ void setup(void)
   }
 
   
-  temperature = 24;
-
+  
   for (int j=0;j<N_PRESSURE_SENSORS;j++)
   {
     i2c_MuxSelect(pressure_sensor_i2c_mux[j]);
@@ -719,6 +820,9 @@ void setup(void)
   valve_contol(VALVE_OUT, VALVE_CLOSE);
    
   i2c_MuxSelect(IIC_MUX_P_FASTLOOP);
+
+
+  watchdog_time =millis();
 }
 
 
@@ -890,6 +994,49 @@ void SetCommandCallback(cmd* c) {
       Serial.println("valore=OK");
     }
     
+    if (strPatam == "alarm_snooze")
+    {
+      int numberValue = value.getValue().toInt();
+      ResetAlarm(numberValue);
+      Serial.println("valore=OK");
+    }
+
+    if (strPatam == "alarm")
+    {
+      int numberValue = value.getValue().toInt();
+      TriggerAlarm(ALARM_GUI_ALARM);
+      Serial.println("valore=OK");
+    }  
+
+    if (strPatam == "watchdog_reset")
+    {
+      int numberValue = value.getValue().toInt();
+      watchdog_time = millis();
+      Serial.println("valore=OK");
+    }  
+
+    if (strPatam == "console")
+    {
+      int numberValue = value.getValue().toInt();
+      __CONSOLE_MODE = numberValue != 0 ? true:false;
+      Serial.println("valore=OK");
+    }          
+
+    if (strPatam == "timestamp")
+    {
+      int numberValue = value.getValue().toInt();
+      __ADDTimeStamp = numberValue != 0 ? true:false;
+      Serial.println("valore=OK");
+    }          
+
+   if (strPatam == "wdenable")
+    {
+      int numberValue = value.getValue().toInt();
+      __WDENABLE = numberValue != 0 ? true:false;
+      Serial.println("valore=OK");
+    }          
+
+
     
 }
 
@@ -906,6 +1053,16 @@ void GetCommandCallback(cmd* c) {
 
     //Serial.println("CMD: " +  param.getValue() + " " +  value.getValue());
 
+    if (strPatam == "run")
+    {
+      Serial.println("valore="+String(core_config.run?1:0));
+    }
+    
+    if (strPatam == "mode")
+    {
+      Serial.println("valore="+String(core_config.BreathMode == M_BREATH_ASSISTED?1:0));
+    }
+
     if (strPatam == "pressure")
     {
       Serial.println("valore="+String(pressure[0].last_pressure));
@@ -918,17 +1075,61 @@ void GetCommandCallback(cmd* c) {
 
     if (strPatam == "o2")
     {
-      Serial.println("valore="+0);
+      Serial.println("valore="+String(last_O2));
     }
 
     if (strPatam == "bpm")
     {
-      Serial.println("valore="+1);
+      Serial.println("valore="+String(last_bpm));
     }
 
+    if (strPatam == "backup")
+    {
+      Serial.println("valore="+String(0));
+    }
+
+    if (strPatam == "tidal")
+    {
+      Serial.println("valore="+String(tidal_volume_c.TidalVolume));
+    }    
+
+    if (strPatam == "peep")
+    {
+      Serial.println("valore="+String(last_peep));
+    }     
+
+    if (strPatam == "temperature")
+    {
+      Serial.println("valore="+String(temperature));
+    }   
+
+    if (strPatam == "power_mode")
+    {
+      Serial.println("valore="+String(batteryPowered?1:0));
+    }    
+
+    if (strPatam == "battery")
+    {
+
+      Serial.println("valore="+String(currentBatteryCharge));
+    }  
+
+    if (strPatam == "version")
+    {
+      Serial.println("valore="+String(_FIRMWARE_VERSION_));
+    }            
+              
+    if (strPatam == "alarm")
+    {
+      Serial.println("valore="+String(ALARM_FLAG) );
+    }
+    
     if (strPatam == "all")
     {
-      Serial.println("valore="+String(pressure[0].last_pressure) + "," + String(gasflux[0].last_flux) + "," + String(0) + "," + String(1));
+      Serial.println("valore="+String(pressure[0].last_pressure) + "," + 
+            String(tidal_volume_c.FLUX) + "," + String(last_O2) + "," + String(last_bpm)
+            + "," + String(tidal_volume_c.TidalVolume) + "," + String(last_peep)
+            + "," + String(temperature) + "," + String(batteryPowered?1:0) + "," + String(currentBatteryCharge) );
     }  
 
 
@@ -1097,14 +1298,27 @@ void loop() {
   static int serverhanging = 0; // Used to monitor how long the client is hanging
   static int serverhangingrestartdelay = 500; // delay after which we discard a hanging client
   static uint32_t sensor_read_last_time =0;
-  
+
+  //Check connection with raspberry when RUN
+  if (__CONSOLE_MODE==false)
+  {
+    if ((core_config.run) && (__WDENABLE == true))
+    {
+      if (millis() > watchdog_time + 5000)
+      {
+        TriggerAlarm(ALARM_GUI_WDOG);
+      }
+    }
+  }
+
+
   if (read_pressure_sensor(0)!= 0)
   {
     TriggerAlarm(UNABLE_TO_READ_SENSOR_PRESSURE);
   }
 
   PressureControlLoop_PRESSIN();
-  
+
 
  /*if (peep_look==true)
  {
@@ -1118,6 +1332,7 @@ void loop() {
   {
     if (read_pressure_sensor(1)!= 0)
     {
+      TriggerAlarm(UNABLE_TO_READ_SENSOR_PRESSURE);
     }
     PressureControlLoop_PRESSIN_SLOW();
     pplow = 0.90*pplow + pressure[1].last_pressure *0.1;
@@ -1128,7 +1343,10 @@ void loop() {
     // 
     //}
     i2c_MuxSelect(IIC_MUX_FLOW1);
-    MeasureFlux_SFM3019(&sfm3019_inhale, &flux);
+    if (!MeasureFlux_SFM3019(&sfm3019_inhale, &flux, &temperature))
+    {
+      TriggerAlarm(UNABLE_TO_READ_SENSOR_FLUX);
+    }
 
     gasflux[0].last_flux = flux; //gasflux[0].last_flux * 0.5 + (0.5*flux);
 
@@ -1146,6 +1364,7 @@ void loop() {
     i2c_MuxSelect(pressure_sensor_i2c_mux[2]);
     if (read_pressure_sensor(2)!= 0)
     {
+      TriggerAlarm(UNABLE_TO_READ_SENSOR_VENTURI);
     }
     float dp, vf;
     dp = pressure[2].last_pressure;
@@ -1187,9 +1406,12 @@ void loop() {
     //String(dbg_state_machine*10)+"," + String(dgb_delta*100) + "," + String(dbg_trigger*50)+ "," + String(dgb_peaktime));
 
 
-  if (GUI_MODE==0)
-    DBG_print(1,String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(pressure[1].last_pressure)+ ","  + String(PIDMonitor*100/4096) +  ","  + String(PIDMonitor2) + "," + String(valve2_status)+ "," + 
+  if (__CONSOLE_MODE==true)
+  {
+    String ts = __ADDTimeStamp ? String(millis())+ "," : "";
+    DBG_print(1,ts + String(gasflux[0].last_flux) + "," + String(pressure[0].last_pressure)+ "," + String(pressure[1].last_pressure)+ ","  + String(PIDMonitor*100/4096) +  ","  + String(PIDMonitor2) + "," + String(valve2_status)+ "," + 
      String(VenturiFlux) + "," + String(tidal_volume_c.FLUX) + "," + String(tidal_volume_c.TidalVolume*0.02));
+  }
      //String(dgb_delta*100) + "," + String(dbg_trigger*50));
     
   if (Serial.available()) {
@@ -1750,7 +1972,7 @@ bool InitFlowMeter_SFM3019(SfmConfig *sfm3019)
     return true;
 }
 
-bool MeasureFlux_SFM3019(SfmConfig *sfm3019, float *Flow)
+bool MeasureFlux_SFM3019(SfmConfig *sfm3019, float *Flow, float *T)
 {
   int16_t flow_raw;
   int16_t temperature_raw;
@@ -1769,7 +1991,7 @@ bool MeasureFlux_SFM3019(SfmConfig *sfm3019, float *Flow)
           //Serial.println("Error while converting flow");
           return false;
       }
-      //temperature = sfm_common_convert_temperature_float(temperature_raw);
+      *T = sfm_common_convert_temperature_float(temperature_raw);
       *Flow = flow;
       //Serial.println("Flow: " + String(flow)  + " flow_raw: " + String(flow_raw) + " T: " +String(temperature) + " Traw: " +String(temperature_raw) + " status: " + String(status));
   }
