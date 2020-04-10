@@ -1198,7 +1198,7 @@ void PressureControlLoop_PRESSIN_SLOW()
   if (Pset == 0)
   {
     Pset2 = Pmeas;
-    FeedForward=Pset2;
+    FeedForward=0*Pset2;
     pid_integral=0;
     pid_prec=0;
     pid_outb=0;
@@ -1258,7 +1258,7 @@ void PressureControlLoop_PRESSIN()
 
   if (Pset == 0)
   {
-    FeedForward=0.9*pid_outb; // 90% of last action used as feedforward
+    FeedForward=0.0*pid_outb; // 90% of last action used as feedforward
     Pset2 =Pmeas ;
     //if (pid_integral == (4095/PID_I))
       pid_integral=0;
